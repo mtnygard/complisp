@@ -1,8 +1,8 @@
-#include <assert.h>	  // for assert
-#include <stdbool.h>  // for bool
-#include <stddef.h>	  // for NULL
-#include <stdint.h>	  // for int32_t, etc
-#include <string.h>	  // for memcpy
+#include <assert.h>		// for assert
+#include <stdbool.h>	// for bool
+#include <stddef.h>		// for NULL
+#include <stdint.h>		// for int32_t, etc
+#include <string.h>		// for memcpy
 #include <sys/mman.h> // for mmap
 
 #include "greatest.h"
@@ -28,8 +28,8 @@
 typedef int64_t word;
 typedef uint64_t uword;
 
-const int kBitsPerByte = 8;						   // bits
-const int kWordSize = sizeof(word);				   // bytes
+const int kBitsPerByte = 8;												 // bits
+const int kWordSize = sizeof(word);								 // bytes
 const int kBitsPerWord = kWordSize * kBitsPerByte; // bits
 
 const unsigned int kIntegerTag = 0x0;
@@ -445,6 +445,8 @@ typedef enum
 	kNotCarry = kAboveOrEqual,
 	kEqual,
 	kZero = kEqual,
+	kLess = 0xc,
+	kNotGreaterOrEqual = kLess,
 } Condition;
 
 typedef struct Indirect
@@ -627,12 +629,12 @@ ASTNode *operand2(ASTNode *args)
 	return AST_pair_car(AST_pair_cdr(args));
 }
 
-#define _(exp)             \
-	do                     \
-	{                      \
-		int result = exp;  \
-		if (result != 0)   \
-			return result; \
+#define _(exp)        \
+	do                  \
+	{                   \
+		int result = exp; \
+		if (result != 0)  \
+			return result;  \
 	} while (0)
 
 int Compile_expr(Buffer *buf, ASTNode *node, word stack_index)
@@ -751,6 +753,9 @@ int Compile_call(Buffer *buf, ASTNode *callable, ASTNode *args, word stack_index
 		if (AST_symbol_matches(callable, "*"))
 		{
 			_(Compile_expr(buf, operand2(args), stack_index));
+			// Remove the tag so that the result is still only tagged with 0b00
+			// instead of 0b0000
+			Emit_shr_reg_imm8(buf, kRax, kIntegerShift);
 			Emit_store_reg_indirect(buf, Ind(kRbp, stack_index), kRax);
 			_(Compile_expr(buf, operand1(args), stack_index - kWordSize));
 			Emit_mul_reg_indirect(buf, Ind(kRbp, stack_index));
@@ -775,7 +780,7 @@ int Compile_call(Buffer *buf, ASTNode *callable, ASTNode *args, word stack_index
 			_(Compile_expr(buf, operand1(args), stack_index - kWordSize));
 			Emit_cmp_reg_indirect(buf, kRax, Ind(kRbp, stack_index));
 			Emit_mov_reg_imm32(buf, kRax, 0);
-			Emit_setcc_imm8(buf, kBelow, kAl);
+			Emit_setcc_imm8(buf, kLess, kAl);
 			Emit_shl_reg_imm8(buf, kRax, kBoolShift);
 			Emit_or_reg_imm8(buf, kRax, kBoolTag);
 			return 0;
@@ -785,19 +790,19 @@ int Compile_call(Buffer *buf, ASTNode *callable, ASTNode *args, word stack_index
 }
 
 static const byte kFunctionPrologue[] = {
-	// push rbp
-	0x55,
-	// mov rbp, rsp
-	kRexPrefix,
-	0x89,
-	0xe5,
+		// push rbp
+		0x55,
+		// mov rbp, rsp
+		kRexPrefix,
+		0x89,
+		0xe5,
 };
 
 static const byte kFunctionEpilogue[] = {
-	// pop rbp
-	0x5d,
-	// ret
-	0xc3,
+		// pop rbp
+		0x5d,
+		// ret
+		0xc3,
 };
 
 int Compile_function(Buffer *buf, ASTNode *node)
@@ -987,10 +992,10 @@ uword Testing_execute_expr(Buffer *buf)
 }
 
 TEST Testing_expect_function_has_contents(Buffer *buf, byte *arr,
-										  size_t arr_size)
+																					size_t arr_size)
 {
 	size_t total_size =
-		sizeof kFunctionPrologue + arr_size + sizeof kFunctionEpilogue;
+			sizeof kFunctionPrologue + arr_size + sizeof kFunctionEpilogue;
 	ASSERT_EQ(total_size, buf->len);
 
 	byte *ptr = buf->address;
@@ -1009,9 +1014,9 @@ TEST Testing_expect_function_has_contents(Buffer *buf, byte *arr,
 #define EXPECT_FUNCTION_CONTAINS_CODE(buf, arr) \
 	CHECK_CALL(Testing_expect_function_has_contents(buf, arr, sizeof arr))
 
-#define RUN_BUFFER_TEST(test_name)           \
-	do                                       \
-	{                                        \
+#define RUN_BUFFER_TEST(test_name)       \
+	do                                     \
+	{                                      \
 		Buffer buf;                          \
 		Buffer_init(&buf, 1);                \
 		GREATEST_RUN_TEST1(test_name, &buf); \
@@ -1136,40 +1141,40 @@ TEST ast_new_symbol(void)
 	PASS();
 }
 
-#define ASSERT_IS_CHAR_EQ(node, c)                                  \
-	do                                                              \
-	{                                                               \
-		ASTNode *__tmp = node;                                      \
-		if (AST_is_error(__tmp))                                    \
-		{                                                           \
+#define ASSERT_IS_CHAR_EQ(node, c)                            \
+	do                                                          \
+	{                                                           \
+		ASTNode *__tmp = node;                                    \
+		if (AST_is_error(__tmp))                                  \
+		{                                                         \
 			fprintf(stderr, "Expected a char but got an error.\n"); \
-		}                                                           \
-		ASSERT(AST_is_char(__tmp));                                 \
-		ASSERT_EQ(AST_get_char(__tmp), c);                          \
+		}                                                         \
+		ASSERT(AST_is_char(__tmp));                               \
+		ASSERT_EQ(AST_get_char(__tmp), c);                        \
 	} while (0);
 
-#define ASSERT_IS_INT_EQ(node, val)                                 \
-	do                                                              \
-	{                                                               \
+#define ASSERT_IS_INT_EQ(node, val)                           \
+	do                                                          \
+	{                                                           \
+		ASTNode *__tmp = node;                                    \
+		if (AST_is_error(__tmp))                                  \
+		{                                                         \
+			fprintf(stderr, "Expected an int but got an error.\n"); \
+		}                                                         \
+		ASSERT(AST_is_integer(__tmp));                            \
+		ASSERT_EQ(AST_get_integer(__tmp), val);                   \
+	} while (0);
+
+#define ASSERT_IS_SYM_EQ(node, cstr)                            \
+	do                                                            \
+	{                                                             \
 		ASTNode *__tmp = node;                                      \
 		if (AST_is_error(__tmp))                                    \
 		{                                                           \
-			fprintf(stderr, "Expected an int but got an error.\n"); \
-		}                                                           \
-		ASSERT(AST_is_integer(__tmp));                              \
-		ASSERT_EQ(AST_get_integer(__tmp), val);                     \
-	} while (0);
-
-#define ASSERT_IS_SYM_EQ(node, cstr)                                  \
-	do                                                                \
-	{                                                                 \
-		ASTNode *__tmp = node;                                        \
-		if (AST_is_error(__tmp))                                      \
-		{                                                             \
 			fprintf(stderr, "Expected a symbol but got an error.\n"); \
-		}                                                             \
-		ASSERT(AST_is_symbol(__tmp));                                 \
-		ASSERT_STR_EQ(AST_symbol_cstr(__tmp), cstr);                  \
+		}                                                           \
+		ASSERT(AST_is_symbol(__tmp));                               \
+		ASSERT_STR_EQ(AST_symbol_cstr(__tmp), cstr);                \
 	} while (0);
 
 TEST read_with_integer_returns_integer(void)
@@ -1429,7 +1434,7 @@ TEST compile_unary_add1(Buffer *buf)
 	ASSERT_EQ(compile_result, 0);
 	// mov rax, imm(123); add rax, imm(1)
 	byte expected[] = {0x48, 0xc7, 0xc0, 0xec, 0x01, 0x00, 0x00,
-					   0x48, 0x05, 0x04, 0x00, 0x00, 0x00};
+										 0x48, 0x05, 0x04, 0x00, 0x00, 0x00};
 	EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
 	Buffer_make_executable(buf);
 	uword result = Testing_execute_expr(buf);
@@ -1441,12 +1446,12 @@ TEST compile_unary_add1(Buffer *buf)
 TEST compile_unary_add1_nested(Buffer *buf)
 {
 	ASTNode *node =
-		new_unary_call("add1", new_unary_call("add1", AST_new_integer(123)));
+			new_unary_call("add1", new_unary_call("add1", AST_new_integer(123)));
 	int compile_result = Compile_function(buf, node);
 	ASSERT_EQ(compile_result, 0);
 	// mov rax, imm(123); add rax, imm(1); add rax, imm(1)
 	byte expected[] = {0x48, 0xc7, 0xc0, 0xec, 0x01, 0x00, 0x00, 0x48, 0x05, 0x04,
-					   0x00, 0x00, 0x00, 0x48, 0x05, 0x04, 0x00, 0x00, 0x00};
+										 0x00, 0x00, 0x00, 0x48, 0x05, 0x04, 0x00, 0x00, 0x00};
 	EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
 	Buffer_make_executable(buf);
 	uword result = Testing_execute_expr(buf);
@@ -1462,7 +1467,7 @@ TEST compile_unary_sub1(Buffer *buf)
 	ASSERT_EQ(compile_result, 0);
 	// mov rax, imm(123); sub rax, imm(1)
 	byte expected[] = {0x48, 0xc7, 0xc0, 0xec, 0x01, 0x00, 0x00,
-					   0x48, 0x2d, 0x04, 0x00, 0x00, 0x00};
+										 0x48, 0x2d, 0x04, 0x00, 0x00, 0x00};
 	EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
 	Buffer_make_executable(buf);
 	uword result = Testing_execute_expr(buf);
@@ -1478,7 +1483,7 @@ TEST compile_unary_integer_to_char(Buffer *buf)
 	ASSERT_EQ(compile_result, 0);
 	// mov rax, imm(97); shl rax, 6; or rax, 0xf
 	byte expected[] = {0x48, 0xc7, 0xc0, 0x84, 0x01, 0x00, 0x00, 0x48,
-					   0xc1, 0xe0, 0x06, 0x48, 0x83, 0xc8, 0x0f};
+										 0xc1, 0xe0, 0x06, 0x48, 0x83, 0xc8, 0x0f};
 	EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
 	Buffer_make_executable(buf);
 	uword result = Testing_execute_expr(buf);
@@ -1494,7 +1499,7 @@ TEST compile_unary_char_to_integer(Buffer *buf)
 	ASSERT_EQ(compile_result, 0);
 	// mov rax, imm('a'); shr rax, 6
 	byte expected[] = {0x48, 0xc7, 0xc0, 0x0f, 0x61, 0x00,
-					   0x00, 0x48, 0xc1, 0xe8, 0x06};
+										 0x00, 0x48, 0xc1, 0xe8, 0x06};
 	EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
 	Buffer_make_executable(buf);
 	uword result = Testing_execute_expr(buf);
@@ -1515,9 +1520,9 @@ TEST compile_unary_nilp_with_nil_returns_true(Buffer *buf)
 	// 17: 48 c1 e0 07             shl    rax,0x7
 	// 1b: 48 83 c8 1f             or     rax,0x1f
 	byte expected[] = {0x48, 0xc7, 0xc0, 0x2f, 0x00, 0x00, 0x00, 0x48,
-					   0x3d, 0x2f, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0,
-					   0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48,
-					   0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
+										 0x3d, 0x2f, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0,
+										 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48,
+										 0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
 	EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
 	Buffer_make_executable(buf);
 	uword result = Testing_execute_expr(buf);
@@ -1538,9 +1543,9 @@ TEST compile_unary_nilp_with_non_nil_returns_false(Buffer *buf)
 	// 17: 48 c1 e0 07             shl    rax,0x7
 	// 1b: 48 83 c8 1f             or     rax,0x1f
 	byte expected[] = {0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00, 0x48,
-					   0x3d, 0x2f, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0,
-					   0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48,
-					   0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
+										 0x3d, 0x2f, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0,
+										 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48,
+										 0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
 	EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
 	Buffer_make_executable(buf);
 	uword result = Testing_execute_expr(buf);
@@ -1561,9 +1566,9 @@ TEST compile_unary_zerop_with_zero_returns_true(Buffer *buf)
 	// 17: 48 c1 e0 07             shl    rax,0x7
 	// 1b: 48 83 c8 1f             or     rax,0x1f
 	byte expected[] = {0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x48,
-					   0x3d, 0x00, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0,
-					   0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48,
-					   0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
+										 0x3d, 0x00, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0,
+										 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48,
+										 0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
 	EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
 	Buffer_make_executable(buf);
 	uword result = Testing_execute_expr(buf);
@@ -1584,9 +1589,9 @@ TEST compile_unary_zerop_with_non_zero_returns_false(Buffer *buf)
 	// 17: 48 c1 e0 07             shl    rax,0x7
 	// 1b: 48 83 c8 1f             or     rax,0x1f
 	byte expected[] = {0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00, 0x48,
-					   0x3d, 0x00, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0,
-					   0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48,
-					   0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
+										 0x3d, 0x00, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0,
+										 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48,
+										 0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
 	EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
 	Buffer_make_executable(buf);
 	uword result = Testing_execute_expr(buf);
@@ -1607,9 +1612,9 @@ TEST compile_unary_not_with_false_returns_true(Buffer *buf)
 	// 17: 48 c1 e0 07             shl    rax,0x7
 	// 1b: 48 83 c8 1f             or     rax,0x1f
 	byte expected[] = {0x48, 0xc7, 0xc0, 0x1f, 0x00, 0x00, 0x00, 0x48,
-					   0x3d, 0x1f, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0,
-					   0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48,
-					   0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
+										 0x3d, 0x1f, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0,
+										 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48,
+										 0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
 	EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
 	Buffer_make_executable(buf);
 	uword result = Testing_execute_expr(buf);
@@ -1630,9 +1635,9 @@ TEST compile_unary_not_with_non_false_returns_false(Buffer *buf)
 	// 17: 48 c1 e0 07             shl    rax,0x7
 	// 1b: 48 83 c8 1f             or     rax,0x1f
 	byte expected[] = {0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00, 0x48,
-					   0x3d, 0x1f, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0,
-					   0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48,
-					   0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
+										 0x3d, 0x1f, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0,
+										 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48,
+										 0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
 	EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
 	Buffer_make_executable(buf);
 	uword result = Testing_execute_expr(buf);
@@ -1654,9 +1659,9 @@ TEST compile_unary_integerp_with_integer_returns_true(Buffer *buf)
 	// 1b: 48 c1 e0 07             shl    rax,0x7
 	// 1f: 48 83 c8 1f             or     rax,0x1f
 	byte expected[] = {0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00, 0x48, 0x83,
-					   0xe0, 0x03, 0x48, 0x3d, 0x00, 0x00, 0x00, 0x00, 0x48,
-					   0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0,
-					   0x48, 0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
+										 0xe0, 0x03, 0x48, 0x3d, 0x00, 0x00, 0x00, 0x00, 0x48,
+										 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0,
+										 0x48, 0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
 	EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
 	Buffer_make_executable(buf);
 	uword result = Testing_execute_expr(buf);
@@ -1678,9 +1683,9 @@ TEST compile_unary_integerp_with_non_integer_returns_false(Buffer *buf)
 	// 1b: 48 c1 e0 07             shl    rax,0x7
 	// 1f: 48 83 c8 1f             or     rax,0x1f
 	byte expected[] = {0x48, 0xc7, 0xc0, 0x2f, 0x00, 0x00, 0x00, 0x48, 0x83,
-					   0xe0, 0x03, 0x48, 0x3d, 0x00, 0x00, 0x00, 0x00, 0x48,
-					   0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0,
-					   0x48, 0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
+										 0xe0, 0x03, 0x48, 0x3d, 0x00, 0x00, 0x00, 0x00, 0x48,
+										 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0,
+										 0x48, 0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
 	EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
 	Buffer_make_executable(buf);
 	uword result = Testing_execute_expr(buf);
@@ -1702,9 +1707,9 @@ TEST compile_unary_booleanp_with_boolean_returns_true(Buffer *buf)
 	// 1b: 48 c1 e0 07             shl    rax,0x7
 	// 1f: 48 83 c8 1f             or     rax,0x1f
 	byte expected[] = {0x48, 0xc7, 0xc0, 0x9f, 0x00, 0x00, 0x00, 0x48, 0x83,
-					   0xe0, 0x3f, 0x48, 0x3d, 0x1f, 0x00, 0x00, 0x00, 0x48,
-					   0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0,
-					   0x48, 0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
+										 0xe0, 0x3f, 0x48, 0x3d, 0x1f, 0x00, 0x00, 0x00, 0x48,
+										 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0,
+										 0x48, 0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
 	EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
 	Buffer_make_executable(buf);
 	uword result = Testing_execute_expr(buf);
@@ -1726,9 +1731,9 @@ TEST compile_unary_booleanp_with_non_boolean_returns_false(Buffer *buf)
 	// 1b: 48 c1 e0 07             shl    rax,0x7
 	// 1f: 48 83 c8 1f             or     rax,0x1f
 	byte expected[] = {0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00, 0x48, 0x83,
-					   0xe0, 0x3f, 0x48, 0x3d, 0x1f, 0x00, 0x00, 0x00, 0x48,
-					   0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0,
-					   0x48, 0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
+										 0xe0, 0x3f, 0x48, 0x3d, 0x1f, 0x00, 0x00, 0x00, 0x48,
+										 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0,
+										 0x48, 0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
 	EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
 	Buffer_make_executable(buf);
 	uword result = Testing_execute_expr(buf);
@@ -1743,14 +1748,14 @@ TEST compile_binary_plus(Buffer *buf)
 	int compile_result = Compile_function(buf, node);
 	ASSERT_EQ(compile_result, 0);
 	byte expected[] = {
-		// 0:  48 c7 c0 20 00 00 00    mov    rax,0x20
-		0x48, 0xc7, 0xc0, 0x20, 0x00, 0x00, 0x00,
-		// 7:  48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
-		0x48, 0x89, 0x45, 0xf8,
-		// b:  48 c7 c0 14 00 00 00    mov    rax,0x14
-		0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00,
-		// 12: 48 03 45 f8             add    rax,QWORD PTR [rbp-0x8]
-		0x48, 0x03, 0x45, 0xf8};
+			// 0:  48 c7 c0 20 00 00 00    mov    rax,0x20
+			0x48, 0xc7, 0xc0, 0x20, 0x00, 0x00, 0x00,
+			// 7:  48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
+			0x48, 0x89, 0x45, 0xf8,
+			// b:  48 c7 c0 14 00 00 00    mov    rax,0x14
+			0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00,
+			// 12: 48 03 45 f8             add    rax,QWORD PTR [rbp-0x8]
+			0x48, 0x03, 0x45, 0xf8};
 	EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
 	Buffer_make_executable(buf);
 	uword result = Testing_execute_expr(buf);
@@ -1762,31 +1767,31 @@ TEST compile_binary_plus(Buffer *buf)
 TEST compile_binary_plus_nested(Buffer *buf)
 {
 	ASTNode *node = new_binary_call(
-		"+", new_binary_call("+", AST_new_integer(1), AST_new_integer(2)),
-		new_binary_call("+", AST_new_integer(3), AST_new_integer(4)));
+			"+", new_binary_call("+", AST_new_integer(1), AST_new_integer(2)),
+			new_binary_call("+", AST_new_integer(3), AST_new_integer(4)));
 	int compile_result = Compile_function(buf, node);
 	ASSERT_EQ(compile_result, 0);
 	byte expected[] = {
-		// 4:  48 c7 c0 10 00 00 00    mov    rax,0x10
-		0x48, 0xc7, 0xc0, 0x10, 0x00, 0x00, 0x00,
-		// b:  48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
-		0x48, 0x89, 0x45, 0xf8,
-		// f:  48 c7 c0 0c 00 00 00    mov    rax,0xc
-		0x48, 0xc7, 0xc0, 0x0c, 0x00, 0x00, 0x00,
-		// 16: 48 03 45 f8             add    rax,QWORD PTR [rbp-0x8]
-		0x48, 0x03, 0x45, 0xf8,
-		// 1a: 48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
-		0x48, 0x89, 0x45, 0xf8,
-		// 1e: 48 c7 c0 08 00 00 00    mov    rax,0x8
-		0x48, 0xc7, 0xc0, 0x08, 0x00, 0x00, 0x00,
-		// 25: 48 89 45 f0             mov    QWORD PTR [rbp-0x10],rax
-		0x48, 0x89, 0x45, 0xf0,
-		// 29: 48 c7 c0 04 00 00 00    mov    rax,0x4
-		0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
-		// 30: 48 03 45 f0             add    rax,QWORD PTR [rbp-0x10]
-		0x48, 0x03, 0x45, 0xf0,
-		// 34: 48 03 45 f8             add    rax,QWORD PTR [rbp-0x8]
-		0x48, 0x03, 0x45, 0xf8};
+			// 4:  48 c7 c0 10 00 00 00    mov    rax,0x10
+			0x48, 0xc7, 0xc0, 0x10, 0x00, 0x00, 0x00,
+			// b:  48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
+			0x48, 0x89, 0x45, 0xf8,
+			// f:  48 c7 c0 0c 00 00 00    mov    rax,0xc
+			0x48, 0xc7, 0xc0, 0x0c, 0x00, 0x00, 0x00,
+			// 16: 48 03 45 f8             add    rax,QWORD PTR [rbp-0x8]
+			0x48, 0x03, 0x45, 0xf8,
+			// 1a: 48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
+			0x48, 0x89, 0x45, 0xf8,
+			// 1e: 48 c7 c0 08 00 00 00    mov    rax,0x8
+			0x48, 0xc7, 0xc0, 0x08, 0x00, 0x00, 0x00,
+			// 25: 48 89 45 f0             mov    QWORD PTR [rbp-0x10],rax
+			0x48, 0x89, 0x45, 0xf0,
+			// 29: 48 c7 c0 04 00 00 00    mov    rax,0x4
+			0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
+			// 30: 48 03 45 f0             add    rax,QWORD PTR [rbp-0x10]
+			0x48, 0x03, 0x45, 0xf0,
+			// 34: 48 03 45 f8             add    rax,QWORD PTR [rbp-0x8]
+			0x48, 0x03, 0x45, 0xf8};
 	EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
 	Buffer_make_executable(buf);
 	uword result = Testing_execute_expr(buf);
@@ -1801,14 +1806,14 @@ TEST compile_binary_minus(Buffer *buf)
 	int compile_result = Compile_function(buf, node);
 	ASSERT_EQ(compile_result, 0);
 	byte expected[] = {
-		// 0:  48 c7 c0 20 00 00 00    mov    rax,0x20
-		0x48, 0xc7, 0xc0, 0x20, 0x00, 0x00, 0x00,
-		// 7:  48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
-		0x48, 0x89, 0x45, 0xf8,
-		// b:  48 c7 c0 14 00 00 00    mov    rax,0x14
-		0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00,
-		// 12: 48 2b 45 f8             add    rax,QWORD PTR [rbp-0x8]
-		0x48, 0x2b, 0x45, 0xf8};
+			// 0:  48 c7 c0 20 00 00 00    mov    rax,0x20
+			0x48, 0xc7, 0xc0, 0x20, 0x00, 0x00, 0x00,
+			// 7:  48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
+			0x48, 0x89, 0x45, 0xf8,
+			// b:  48 c7 c0 14 00 00 00    mov    rax,0x14
+			0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00,
+			// 12: 48 2b 45 f8             add    rax,QWORD PTR [rbp-0x8]
+			0x48, 0x2b, 0x45, 0xf8};
 	EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
 	Buffer_make_executable(buf);
 	uword result = Testing_execute_expr(buf);
@@ -1820,31 +1825,31 @@ TEST compile_binary_minus(Buffer *buf)
 TEST compile_binary_minus_nested(Buffer *buf)
 {
 	ASTNode *node = new_binary_call(
-		"-", new_binary_call("-", AST_new_integer(5), AST_new_integer(1)),
-		new_binary_call("-", AST_new_integer(4), AST_new_integer(3)));
+			"-", new_binary_call("-", AST_new_integer(5), AST_new_integer(1)),
+			new_binary_call("-", AST_new_integer(4), AST_new_integer(3)));
 	int compile_result = Compile_function(buf, node);
 	ASSERT_EQ(compile_result, 0);
 	byte expected[] = {
-		// 4:  48 c7 c0 0c 00 00 00    mov    rax,0xc
-		0x48, 0xc7, 0xc0, 0x0c, 0x00, 0x00, 0x00,
-		// b:  48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
-		0x48, 0x89, 0x45, 0xf8,
-		// f:  48 c7 c0 10 00 00 00    mov    rax,0x10
-		0x48, 0xc7, 0xc0, 0x10, 0x00, 0x00, 0x00,
-		// 16: 48 2b 45 f8             add    rax,QWORD PTR [rbp-0x8]
-		0x48, 0x2b, 0x45, 0xf8,
-		// 1a: 48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
-		0x48, 0x89, 0x45, 0xf8,
-		// 1e: 48 c7 c0 04 00 00 00    mov    rax,0x4
-		0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
-		// 25: 48 89 45 f0             mov    QWORD PTR [rbp-0x10],rax
-		0x48, 0x89, 0x45, 0xf0,
-		// 29: 48 c7 c0 14 00 00 00    mov    rax,0x14
-		0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00,
-		// 30: 48 2b 45 f0             add    rax,QWORD PTR [rbp-0x10]
-		0x48, 0x2b, 0x45, 0xf0,
-		// 34: 48 2b 45 f8             add    rax,QWORD PTR [rbp-0x8]
-		0x48, 0x2b, 0x45, 0xf8};
+			// 4:  48 c7 c0 0c 00 00 00    mov    rax,0xc
+			0x48, 0xc7, 0xc0, 0x0c, 0x00, 0x00, 0x00,
+			// b:  48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
+			0x48, 0x89, 0x45, 0xf8,
+			// f:  48 c7 c0 10 00 00 00    mov    rax,0x10
+			0x48, 0xc7, 0xc0, 0x10, 0x00, 0x00, 0x00,
+			// 16: 48 2b 45 f8             add    rax,QWORD PTR [rbp-0x8]
+			0x48, 0x2b, 0x45, 0xf8,
+			// 1a: 48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
+			0x48, 0x89, 0x45, 0xf8,
+			// 1e: 48 c7 c0 04 00 00 00    mov    rax,0x4
+			0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
+			// 25: 48 89 45 f0             mov    QWORD PTR [rbp-0x10],rax
+			0x48, 0x89, 0x45, 0xf0,
+			// 29: 48 c7 c0 14 00 00 00    mov    rax,0x14
+			0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00,
+			// 30: 48 2b 45 f0             add    rax,QWORD PTR [rbp-0x10]
+			0x48, 0x2b, 0x45, 0xf0,
+			// 34: 48 2b 45 f8             add    rax,QWORD PTR [rbp-0x8]
+			0x48, 0x2b, 0x45, 0xf8};
 	EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
 	Buffer_make_executable(buf);
 	uword result = Testing_execute_expr(buf);
@@ -1860,9 +1865,6 @@ TEST compile_binary_mul(Buffer *buf)
 	ASSERT_EQ(compile_result, 0);
 	Buffer_make_executable(buf);
 	uword result = Testing_execute_expr(buf);
-	printf("about to fail on Object_encode_integer(40) != result. Result is actually 0x%lx\n", result);
-	printf("Object_decode_integer(result) == 0x%lx\n", Object_decode_integer(result));
-	printf("Object_encode_integer(40) == 0x%lx\n", Object_encode_integer(40));
 	ASSERT_EQ_FMT(Object_encode_integer(40), result, "0x%lx");
 	AST_heap_free(node);
 	PASS();
@@ -1871,8 +1873,8 @@ TEST compile_binary_mul(Buffer *buf)
 TEST compile_binary_mul_nested(Buffer *buf)
 {
 	ASTNode *node = new_binary_call(
-		"*", new_binary_call("*", AST_new_integer(1), AST_new_integer(2)),
-		new_binary_call("*", AST_new_integer(3), AST_new_integer(4)));
+			"*", new_binary_call("*", AST_new_integer(1), AST_new_integer(2)),
+			new_binary_call("*", AST_new_integer(3), AST_new_integer(4)));
 	int compile_result = Compile_function(buf, node);
 	ASSERT_EQ(compile_result, 0);
 	Buffer_make_executable(buf);
@@ -1913,6 +1915,7 @@ TEST compile_binary_lt_with_left_less_than_right_returns_true(Buffer *buf)
 	ASSERT_EQ(compile_result, 0);
 	Buffer_make_executable(buf);
 	uword result = Testing_execute_expr(buf);
+	printf("About to assert on result == Object_true(). Result is 0x%lx, Object_true() is 0x%lx\n", result, Object_true());
 	ASSERT_EQ_FMT(Object_true(), result, "0x%lx");
 	AST_heap_free(node);
 	PASS();
