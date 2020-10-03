@@ -7,6 +7,16 @@
       "program": "${workspaceFolder}/lisp",
       "args": [],
       "cwd": "${workspaceFolder}"
-    }
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Launch REPL",
+      "program": "${workspaceFolder}/lisp",
+      "args": [
+        "--repl-eval"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
   ]
 }

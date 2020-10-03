@@ -77,6 +77,11 @@ char Object_decode_char(word value)
   return (value >> kCharShift) & kCharMask;
 }
 
+bool Object_is_char(uword value)
+{
+  return (value & kCharTag) == kCharTag;
+}
+
 const unsigned int kBoolTag = 0x1f;
 const unsigned int kBoolMask = 0x80;
 const unsigned int kBoolShift = 7;
@@ -942,6 +947,7 @@ bool starts_symbol(char c)
   case '+':
   case '-':
   case '*':
+  case '<':
   case '>':
   case '=':
   case '?':
@@ -2218,6 +2224,35 @@ void print_value(uword object)
   if (Object_is_integer(object))
   {
     fprintf(stderr, "%ld", Object_decode_integer(object));
+    return;
+  }
+  if (object == Object_false())
+  {
+    fprintf(stderr, "#f");
+    return;
+  }
+  if (object == Object_true())
+  {
+    fprintf(stderr, "#t");
+    return;
+  }
+  if (object == Object_nil())
+  {
+    fprintf(stderr, "nil");
+    return;
+  }
+  if (Object_is_char(object))
+  {
+    fprintf(stderr, "%c", Object_decode_char(object));
+    return;
+  }
+  if (AST_is_heap_object((ASTNode *)object) && AST_is_pair((ASTNode *)object))
+  {
+    fprintf(stderr, "(");
+    print_value((uword)AST_pair_car((ASTNode *)object));
+    fprintf(stderr, " ");
+    print_value((uword)AST_pair_cdr((ASTNode *)object));
+    fprintf(stderr, ")");
     return;
   }
   fprintf(stderr, "Unprintable value");
