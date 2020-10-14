@@ -95,7 +95,25 @@ const unsigned int kPairTag = 0x1;
 const uword kHeapTagMask = ((uword)0x7);
 const uword kHeapPtrMask = ~kHeapTagMask;
 
+const unsigned int kCarIndex = 0;
+const unsigned int kCarOffset = kCarIndex * kWordSize;
+const unsigned int kCdrIndex = kCarIndex + 1;
+const unsigned int kCdrOffset = kCdrIndex * kWordSize;
+const unsigned int kPairSize = kCdrOffset + kWordSize;
+
 uword Object_address(void *obj) { return (uword)obj & kHeapPtrMask; }
+
+bool Object_is_pair(uword value) { return (value & kHeapTagMask) == kPairTag; }
+
+uword Object_pair_car(uword value) {
+  assert(Object_is_pair(value));
+  return ((uword *)Object_address((void *)value))[kCarIndex];
+}
+
+uword Object_pair_cdr(uword value) {
+  assert(Object_is_pair(value));
+  return ((uword *)Object_address((void *)value))[kCdrIndex];
+}
 
 const unsigned int kSymbolTag = 0x5;
 
@@ -407,6 +425,12 @@ void Emit_mov_reg_imm32(Buffer *buf, Register dst, int32_t src) {
   Buffer_write32(buf, src);
 }
 
+void Emit_mov_reg_reg(Buffer *buf, Register dst, Register src) {
+  Buffer_write8(buf, kRexPrefix);
+  Buffer_write8(buf, 0x89);
+  Buffer_write8(buf, 0xc0 + src * 8 + dst);
+}
+
 void Emit_ret(Buffer *buf) { Buffer_write8(buf, 0xc3); }
 
 void Emit_add_reg_imm32(Buffer *buf, Register dst, int32_t src) {
@@ -630,6 +654,28 @@ int Compile_if(Buffer *buf, ASTNode *cond, ASTNode *consequent,
   return 0;
 }
 
+const Register kHeapPointer = kRsi;
+
+int Compile_cons(Buffer *buf, ASTNode *car, ASTNode *cdr, int stack_index,
+                 Env *varenv) {
+  // Compile and store car on the stack
+  _(Compile_expr(buf, car, stack_index, varenv));
+  Emit_store_reg_indirect(buf, Ind(kRbp, stack_index), kRax);
+  // Compile and store cdr
+  _(Compile_expr(buf, cdr, stack_index - kWordSize, varenv));
+  Emit_store_reg_indirect(buf, Ind(kHeapPointer, kCdrOffset), kRax);
+  // Fetch car and store in heap
+  Emit_load_reg_indirect(buf, kRax, Ind(kRbp, stack_index));
+  Emit_store_reg_indirect(buf, Ind(kHeapPointer, kCarOffset), kRax);
+
+  // Store tagged pointer in tax
+  Emit_mov_reg_reg(buf, kRax, kHeapPointer);
+  Emit_or_reg_imm8(buf, kRax, kPairTag);
+  // Bump the heap pointer
+  Emit_add_reg_imm32(buf, kHeapPointer, kPairSize);
+  return 0;
+}
+
 int Compile_call(Buffer *buf, ASTNode *callable, ASTNode *args,
                  word stack_index, Env *varenv) {
   if (AST_is_symbol(callable)) {
@@ -640,6 +686,20 @@ int Compile_call(Buffer *buf, ASTNode *callable, ASTNode *args,
     if (AST_symbol_matches(callable, "if")) {
       return Compile_if(buf, operand1(args), operand2(args), operand3(args),
                         stack_index, varenv);
+    }
+    if (AST_symbol_matches(callable, "cons")) {
+      return Compile_cons(buf, operand1(args), operand2(args), stack_index,
+                          varenv);
+    }
+    if (AST_symbol_matches(callable, "car")) {
+      _(Compile_expr(buf, operand1(args), stack_index, varenv));
+      Emit_load_reg_indirect(buf, kRax, Ind(kRax, kCarOffset - kPairTag));
+      return 0;
+    }
+    if (AST_symbol_matches(callable, "cdr")) {
+      _(Compile_expr(buf, operand1(args), stack_index, varenv));
+      Emit_load_reg_indirect(buf, kRax, Ind(kRax, kCdrOffset - kPairTag));
+      return 0;
     }
     if (AST_symbol_matches(callable, "add1")) {
       _(Compile_expr(buf, operand1(args), stack_index, varenv));
@@ -767,6 +827,11 @@ int Compile_let(Buffer *buf, ASTNode *bindings, ASTNode *body, word stack_index,
 }
 
 static const byte kFunctionPrologue[] = {
+    // Save the heap in rsi, our global heap pointer
+    // mov rsi, rdi
+    kRexPrefix,
+    0x89,
+    0xfe,
     // push rbp
     0x55,
     // mov rbp, rsp
@@ -782,7 +847,7 @@ static const byte kFunctionEpilogue[] = {
     0xc3,
 };
 
-WARN_UNUSED int Compile_function(Buffer *buf, ASTNode *node) {
+WARN_UNUSED int Compile_entry(Buffer *buf, ASTNode *node) {
   Buffer_write_arr(buf, kFunctionPrologue, sizeof kFunctionPrologue);
   _(Compile_expr(buf, node, -kWordSize, NULL));
   Buffer_write_arr(buf, kFunctionEpilogue, sizeof kFunctionEpilogue);
@@ -797,7 +862,7 @@ void Compile_compare_imm32(Buffer *buf, int32_t value) {
   Emit_or_reg_imm8(buf, kRax, kBoolTag);
 }
 
-typedef int (*JitFunction)();
+typedef int (*JitFunction)(uword *heap);
 
 // Reader
 
@@ -925,7 +990,7 @@ ASTNode *Reader_read(char *input) {
 }
 
 // Testing
-uword Testing_execute_expr(Buffer *buf) {
+uword Testing_execute_entry(Buffer *buf, uword *heap) {
   assert(buf != NULL);
   assert(buf->address != NULL);
   assert(buf->state == kExecutable);
@@ -933,14 +998,18 @@ uword Testing_execute_expr(Buffer *buf) {
   // data-to-function-pointer back-and-forth is only guaranteed to work on
   // POSIX systems (because of eg dlsym).
   JitFunction function = *(JitFunction *)(&buf->address);
-  return function();
+  return function(heap);
 }
 
-TEST Testing_expect_function_has_contents(Buffer *buf, byte *arr,
-                                          size_t arr_size) {
+uword Testing_execute_expr(Buffer *buf) {
+  return Testing_execute_entry(buf, NULL);
+}
+
+TEST Testing_expect_entry_has_contents(Buffer *buf, byte *arr,
+                                       size_t arr_size) {
   size_t total_size =
       sizeof kFunctionPrologue + arr_size + sizeof kFunctionEpilogue;
-  ASSERT_EQ(total_size, buf->len);
+  ASSERT_EQ_FMT(total_size, Buffer_len(buf), "%ld");
 
   byte *ptr = buf->address;
   ASSERT_MEM_EQ(kFunctionPrologue, ptr, sizeof kFunctionPrologue);
@@ -955,14 +1024,24 @@ TEST Testing_expect_function_has_contents(Buffer *buf, byte *arr,
 #define EXPECT_EQUALS_BYTES(buf, arr)                                          \
   ASSERT_MEM_EQ(arr, (buf)->address, sizeof arr)
 
-#define EXPECT_FUNCTION_CONTAINS_CODE(buf, arr)                                \
-  CHECK_CALL(Testing_expect_function_has_contents(buf, arr, sizeof arr))
+#define EXPECT_ENTRY_CONTAINS_CODE(buf, arr)                                   \
+  CHECK_CALL(Testing_expect_entry_has_contents(buf, arr, sizeof arr))
 
 #define RUN_BUFFER_TEST(test_name)                                             \
   do {                                                                         \
     Buffer buf;                                                                \
     Buffer_init(&buf, 1);                                                      \
     GREATEST_RUN_TEST1(test_name, &buf);                                       \
+    Buffer_deinit(&buf);                                                       \
+  } while (0)
+
+#define RUN_HEAP_TEST(test_name)                                               \
+  do {                                                                         \
+    Buffer buf;                                                                \
+    Buffer_init(&buf, 1);                                                      \
+    uword *heap = malloc(1000 * kWordSize);                                    \
+    GREATEST_RUN_TESTp(test_name, &buf, heap);                                 \
+    free(heap);                                                                \
     Buffer_deinit(&buf);                                                       \
   } while (0)
 
@@ -1247,11 +1326,11 @@ TEST buffer_write32_writes_little_endian(Buffer *buf) {
 TEST compile_positive_integer(Buffer *buf) {
   word value = 123;
   ASTNode *node = AST_new_integer(value);
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   // mov eax, imm(123)
   byte expected[] = {0x48, 0xc7, 0xc0, 0xec, 0x01, 0x00, 0x00};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_encode_integer(value));
@@ -1261,11 +1340,11 @@ TEST compile_positive_integer(Buffer *buf) {
 TEST compile_negative_integer(Buffer *buf) {
   word value = -123;
   ASTNode *node = AST_new_integer(value);
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   // mov eax, imm(-123)
   byte expected[] = {0x48, 0xc7, 0xc0, 0x14, 0xfe, 0xff, 0xff};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_encode_integer(value));
@@ -1275,11 +1354,11 @@ TEST compile_negative_integer(Buffer *buf) {
 TEST compile_char(Buffer *buf) {
   char value = 'a';
   ASTNode *node = AST_new_char(value);
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   // mov eax, imm('a')
   byte expected[] = {0x48, 0xc7, 0xc0, 0x0f, 0x61, 0x00, 0x00};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_encode_char(value));
@@ -1288,11 +1367,11 @@ TEST compile_char(Buffer *buf) {
 
 TEST compile_true(Buffer *buf) {
   ASTNode *node = AST_new_bool(true);
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   // mov eax, imm(true)
   byte expected[] = {0x48, 0xc7, 0xc0, 0x9f, 0x0, 0x0, 0x0};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_true());
@@ -1301,11 +1380,11 @@ TEST compile_true(Buffer *buf) {
 
 TEST compile_false(Buffer *buf) {
   ASTNode *node = AST_new_bool(false);
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   // mov eax, imm(false)
   byte expected[] = {0x48, 0xc7, 0xc0, 0x1f, 0x00, 0x00, 0x00};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_false());
@@ -1314,11 +1393,11 @@ TEST compile_false(Buffer *buf) {
 
 TEST compile_nil(Buffer *buf) {
   ASTNode *node = AST_nil();
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   // mov eax, imm(nil)
   byte expected[] = {0x48, 0xc7, 0xc0, 0x2f, 0x00, 0x00, 0x00};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_nil());
@@ -1327,12 +1406,12 @@ TEST compile_nil(Buffer *buf) {
 
 TEST compile_unary_add1(Buffer *buf) {
   ASTNode *node = new_unary_call("add1", AST_new_integer(123));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   // mov rax, imm(123); add rax, imm(1)
   byte expected[] = {0x48, 0xc7, 0xc0, 0xec, 0x01, 0x00, 0x00,
                      0x48, 0x05, 0x04, 0x00, 0x00, 0x00};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_encode_integer(124));
@@ -1343,12 +1422,12 @@ TEST compile_unary_add1(Buffer *buf) {
 TEST compile_unary_add1_nested(Buffer *buf) {
   ASTNode *node =
       new_unary_call("add1", new_unary_call("add1", AST_new_integer(123)));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   // mov rax, imm(123); add rax, imm(1); add rax, imm(1)
   byte expected[] = {0x48, 0xc7, 0xc0, 0xec, 0x01, 0x00, 0x00, 0x48, 0x05, 0x04,
                      0x00, 0x00, 0x00, 0x48, 0x05, 0x04, 0x00, 0x00, 0x00};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_encode_integer(125));
@@ -1358,12 +1437,12 @@ TEST compile_unary_add1_nested(Buffer *buf) {
 
 TEST compile_unary_sub1(Buffer *buf) {
   ASTNode *node = new_unary_call("sub1", AST_new_integer(123));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   // mov rax, imm(123); sub rax, imm(1)
   byte expected[] = {0x48, 0xc7, 0xc0, 0xec, 0x01, 0x00, 0x00,
                      0x48, 0x2d, 0x04, 0x00, 0x00, 0x00};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_encode_integer(122));
@@ -1373,12 +1452,12 @@ TEST compile_unary_sub1(Buffer *buf) {
 
 TEST compile_unary_integer_to_char(Buffer *buf) {
   ASTNode *node = new_unary_call("integer->char", AST_new_integer(97));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   // mov rax, imm(97); shl rax, 6; or rax, 0xf
   byte expected[] = {0x48, 0xc7, 0xc0, 0x84, 0x01, 0x00, 0x00, 0x48,
                      0xc1, 0xe0, 0x06, 0x48, 0x83, 0xc8, 0x0f};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_encode_char('a'));
@@ -1388,12 +1467,12 @@ TEST compile_unary_integer_to_char(Buffer *buf) {
 
 TEST compile_unary_char_to_integer(Buffer *buf) {
   ASTNode *node = new_unary_call("char->integer", AST_new_char('a'));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   // mov rax, imm('a'); shr rax, 6
   byte expected[] = {0x48, 0xc7, 0xc0, 0x0f, 0x61, 0x00,
                      0x00, 0x48, 0xc1, 0xe8, 0x06};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_encode_integer(97));
@@ -1403,7 +1482,7 @@ TEST compile_unary_char_to_integer(Buffer *buf) {
 
 TEST compile_unary_nilp_with_nil_returns_true(Buffer *buf) {
   ASTNode *node = new_unary_call("nil?", AST_nil());
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   // 0:  48 c7 c0 2f 00 00 00    mov    rax,0x2f
   // 7:  48 3d 2f 00 00 00       cmp    rax,0x0000002f
@@ -1415,7 +1494,7 @@ TEST compile_unary_nilp_with_nil_returns_true(Buffer *buf) {
                      0x3d, 0x2f, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0,
                      0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48,
                      0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_true());
@@ -1425,7 +1504,7 @@ TEST compile_unary_nilp_with_nil_returns_true(Buffer *buf) {
 
 TEST compile_unary_nilp_with_non_nil_returns_false(Buffer *buf) {
   ASTNode *node = new_unary_call("nil?", AST_new_integer(5));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   // 0:  48 c7 c0 14 00 00 00    mov    rax,0x14
   // 7:  48 3d 2f 00 00 00       cmp    rax,0x0000002f
@@ -1437,7 +1516,7 @@ TEST compile_unary_nilp_with_non_nil_returns_false(Buffer *buf) {
                      0x3d, 0x2f, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0,
                      0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48,
                      0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_false());
@@ -1447,7 +1526,7 @@ TEST compile_unary_nilp_with_non_nil_returns_false(Buffer *buf) {
 
 TEST compile_unary_zerop_with_zero_returns_true(Buffer *buf) {
   ASTNode *node = new_unary_call("zero?", AST_new_integer(0));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   // 0:  48 c7 c0 00 00 00 00    mov    rax,0x0
   // 7:  48 3d 00 00 00 00       cmp    rax,0x00000000
@@ -1459,7 +1538,7 @@ TEST compile_unary_zerop_with_zero_returns_true(Buffer *buf) {
                      0x3d, 0x00, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0,
                      0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48,
                      0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_true());
@@ -1469,7 +1548,7 @@ TEST compile_unary_zerop_with_zero_returns_true(Buffer *buf) {
 
 TEST compile_unary_zerop_with_non_zero_returns_false(Buffer *buf) {
   ASTNode *node = new_unary_call("zero?", AST_new_integer(5));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   // 0:  48 c7 c0 14 00 00 00    mov    rax,0x14
   // 7:  48 3d 00 00 00 00       cmp    rax,0x00000000
@@ -1481,7 +1560,7 @@ TEST compile_unary_zerop_with_non_zero_returns_false(Buffer *buf) {
                      0x3d, 0x00, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0,
                      0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48,
                      0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_false());
@@ -1491,7 +1570,7 @@ TEST compile_unary_zerop_with_non_zero_returns_false(Buffer *buf) {
 
 TEST compile_unary_not_with_false_returns_true(Buffer *buf) {
   ASTNode *node = new_unary_call("not", AST_new_bool(false));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   // 0:  48 c7 c0 1f 00 00 00    mov    rax,0x1f
   // 7:  48 3d 1f 00 00 00       cmp    rax,0x0000001f
@@ -1503,7 +1582,7 @@ TEST compile_unary_not_with_false_returns_true(Buffer *buf) {
                      0x3d, 0x1f, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0,
                      0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48,
                      0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_true());
@@ -1513,7 +1592,7 @@ TEST compile_unary_not_with_false_returns_true(Buffer *buf) {
 
 TEST compile_unary_not_with_non_false_returns_false(Buffer *buf) {
   ASTNode *node = new_unary_call("not", AST_new_integer(5));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   // 0:  48 c7 c0 14 00 00 00    mov    rax,0x14
   // 7:  48 3d 1f 00 00 00       cmp    rax,0x0000001f
@@ -1525,7 +1604,7 @@ TEST compile_unary_not_with_non_false_returns_false(Buffer *buf) {
                      0x3d, 0x1f, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0,
                      0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48,
                      0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_false());
@@ -1535,7 +1614,7 @@ TEST compile_unary_not_with_non_false_returns_false(Buffer *buf) {
 
 TEST compile_unary_integerp_with_integer_returns_true(Buffer *buf) {
   ASTNode *node = new_unary_call("integer?", AST_new_integer(5));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   // 0:  48 c7 c0 14 00 00 00    mov    rax,0x14
   // 7:  48 83 e0 03             and    rax,0x3
@@ -1548,7 +1627,7 @@ TEST compile_unary_integerp_with_integer_returns_true(Buffer *buf) {
                      0xe0, 0x03, 0x48, 0x3d, 0x00, 0x00, 0x00, 0x00, 0x48,
                      0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0,
                      0x48, 0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_true());
@@ -1558,7 +1637,7 @@ TEST compile_unary_integerp_with_integer_returns_true(Buffer *buf) {
 
 TEST compile_unary_integerp_with_non_integer_returns_false(Buffer *buf) {
   ASTNode *node = new_unary_call("integer?", AST_nil());
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   // 0:  48 c7 c0 2f 00 00 00    mov    rax,0x2f
   // 7:  48 83 e0 03             and    rax,0x3
@@ -1571,7 +1650,7 @@ TEST compile_unary_integerp_with_non_integer_returns_false(Buffer *buf) {
                      0xe0, 0x03, 0x48, 0x3d, 0x00, 0x00, 0x00, 0x00, 0x48,
                      0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0,
                      0x48, 0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_false());
@@ -1581,7 +1660,7 @@ TEST compile_unary_integerp_with_non_integer_returns_false(Buffer *buf) {
 
 TEST compile_unary_booleanp_with_boolean_returns_true(Buffer *buf) {
   ASTNode *node = new_unary_call("boolean?", AST_new_bool(true));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   // 0:  48 c7 c0 9f 00 00 00    mov    rax,0x9f
   // 7:  48 83 e0 3f             and    rax,0x3f
@@ -1594,7 +1673,7 @@ TEST compile_unary_booleanp_with_boolean_returns_true(Buffer *buf) {
                      0xe0, 0x3f, 0x48, 0x3d, 0x1f, 0x00, 0x00, 0x00, 0x48,
                      0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0,
                      0x48, 0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_true());
@@ -1604,7 +1683,7 @@ TEST compile_unary_booleanp_with_boolean_returns_true(Buffer *buf) {
 
 TEST compile_unary_booleanp_with_non_boolean_returns_false(Buffer *buf) {
   ASTNode *node = new_unary_call("boolean?", AST_new_integer(5));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   // 0:  48 c7 c0 14 00 00 00    mov    rax,0x14
   // 7:  48 83 e0 3f             and    rax,0x3f
@@ -1617,7 +1696,7 @@ TEST compile_unary_booleanp_with_non_boolean_returns_false(Buffer *buf) {
                      0xe0, 0x3f, 0x48, 0x3d, 0x1f, 0x00, 0x00, 0x00, 0x48,
                      0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0,
                      0x48, 0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_false());
@@ -1627,7 +1706,7 @@ TEST compile_unary_booleanp_with_non_boolean_returns_false(Buffer *buf) {
 
 TEST compile_binary_plus(Buffer *buf) {
   ASTNode *node = new_binary_call("+", AST_new_integer(5), AST_new_integer(8));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   byte expected[] = {
       // 0:  48 c7 c0 20 00 00 00    mov    rax,0x20
@@ -1638,7 +1717,7 @@ TEST compile_binary_plus(Buffer *buf) {
       0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00,
       // 12: 48 03 45 f8             add    rax,QWORD PTR [rbp-0x8]
       0x48, 0x03, 0x45, 0xf8};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_encode_integer(13));
@@ -1650,7 +1729,7 @@ TEST compile_binary_plus_nested(Buffer *buf) {
   ASTNode *node = new_binary_call(
       "+", new_binary_call("+", AST_new_integer(1), AST_new_integer(2)),
       new_binary_call("+", AST_new_integer(3), AST_new_integer(4)));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   byte expected[] = {
       // 4:  48 c7 c0 10 00 00 00    mov    rax,0x10
@@ -1673,7 +1752,7 @@ TEST compile_binary_plus_nested(Buffer *buf) {
       0x48, 0x03, 0x45, 0xf0,
       // 34: 48 03 45 f8             add    rax,QWORD PTR [rbp-0x8]
       0x48, 0x03, 0x45, 0xf8};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_encode_integer(10));
@@ -1683,7 +1762,7 @@ TEST compile_binary_plus_nested(Buffer *buf) {
 
 TEST compile_binary_minus(Buffer *buf) {
   ASTNode *node = new_binary_call("-", AST_new_integer(5), AST_new_integer(8));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   byte expected[] = {
       // 0:  48 c7 c0 20 00 00 00    mov    rax,0x20
@@ -1694,7 +1773,7 @@ TEST compile_binary_minus(Buffer *buf) {
       0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00,
       // 12: 48 2b 45 f8             add    rax,QWORD PTR [rbp-0x8]
       0x48, 0x2b, 0x45, 0xf8};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_encode_integer(-3));
@@ -1706,7 +1785,7 @@ TEST compile_binary_minus_nested(Buffer *buf) {
   ASTNode *node = new_binary_call(
       "-", new_binary_call("-", AST_new_integer(5), AST_new_integer(1)),
       new_binary_call("-", AST_new_integer(4), AST_new_integer(3)));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   byte expected[] = {
       // 4:  48 c7 c0 0c 00 00 00    mov    rax,0xc
@@ -1729,7 +1808,7 @@ TEST compile_binary_minus_nested(Buffer *buf) {
       0x48, 0x2b, 0x45, 0xf0,
       // 34: 48 2b 45 f8             add    rax,QWORD PTR [rbp-0x8]
       0x48, 0x2b, 0x45, 0xf8};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ(result, Object_encode_integer(3));
@@ -1739,7 +1818,7 @@ TEST compile_binary_minus_nested(Buffer *buf) {
 
 TEST compile_binary_mul(Buffer *buf) {
   ASTNode *node = new_binary_call("*", AST_new_integer(5), AST_new_integer(8));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
@@ -1752,7 +1831,7 @@ TEST compile_binary_mul_nested(Buffer *buf) {
   ASTNode *node = new_binary_call(
       "*", new_binary_call("*", AST_new_integer(1), AST_new_integer(2)),
       new_binary_call("*", AST_new_integer(3), AST_new_integer(4)));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
@@ -1763,7 +1842,7 @@ TEST compile_binary_mul_nested(Buffer *buf) {
 
 TEST compile_binary_eq_with_same_address_returns_true(Buffer *buf) {
   ASTNode *node = new_binary_call("=", AST_new_integer(5), AST_new_integer(5));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
@@ -1774,7 +1853,7 @@ TEST compile_binary_eq_with_same_address_returns_true(Buffer *buf) {
 
 TEST compile_binary_eq_with_different_address_returns_false(Buffer *buf) {
   ASTNode *node = new_binary_call("=", AST_new_integer(5), AST_new_integer(4));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
@@ -1785,7 +1864,7 @@ TEST compile_binary_eq_with_different_address_returns_false(Buffer *buf) {
 
 TEST compile_binary_lt_with_left_less_than_right_returns_true(Buffer *buf) {
   ASTNode *node = new_binary_call("<", AST_new_integer(-5), AST_new_integer(5));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
@@ -1796,7 +1875,7 @@ TEST compile_binary_lt_with_left_less_than_right_returns_true(Buffer *buf) {
 
 TEST compile_binary_lt_with_left_equal_to_right_returns_false(Buffer *buf) {
   ASTNode *node = new_binary_call("<", AST_new_integer(5), AST_new_integer(5));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
@@ -1807,7 +1886,7 @@ TEST compile_binary_lt_with_left_equal_to_right_returns_false(Buffer *buf) {
 
 TEST compile_binary_lt_with_left_greater_than_right_returns_false(Buffer *buf) {
   ASTNode *node = new_binary_call("<", AST_new_integer(6), AST_new_integer(5));
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
@@ -1852,7 +1931,7 @@ TEST compile_symbol_not_in_env_raises_compile_error(Buffer *buf) {
 
 TEST compile_let_with_no_bindings(Buffer *buf) {
   ASTNode *node = Reader_read("(let () (+ 1 2))");
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
@@ -1863,7 +1942,7 @@ TEST compile_let_with_no_bindings(Buffer *buf) {
 
 TEST compile_let_with_one_binding(Buffer *buf) {
   ASTNode *node = Reader_read("(let ((a 1)) (+ a 2))");
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
@@ -1874,7 +1953,7 @@ TEST compile_let_with_one_binding(Buffer *buf) {
 
 TEST compile_let_with_multiple_bindings(Buffer *buf) {
   ASTNode *node = Reader_read("(let ((a 1) (b 2)) (+ a b))");
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
@@ -1885,7 +1964,7 @@ TEST compile_let_with_multiple_bindings(Buffer *buf) {
 
 TEST compile_nested_let(Buffer *buf) {
   ASTNode *node = Reader_read("(let ((a 1)) (let ((b 2)) (+ a b)))");
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
@@ -1896,7 +1975,7 @@ TEST compile_nested_let(Buffer *buf) {
 
 TEST compile_let_is_not_let_star(Buffer *buf) {
   ASTNode *node = Reader_read("(let ((a 1) (b a)) a)");
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, -1);
   AST_heap_free(node);
   PASS();
@@ -1904,7 +1983,7 @@ TEST compile_let_is_not_let_star(Buffer *buf) {
 
 TEST compile_if_with_true_cond(Buffer *buf) {
   ASTNode *node = Reader_read("(if #t 1 2)");
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   byte expected[] = {// mov rax, 0x9f
                      0x48, 0xc7, 0xc0, 0x9f, 0x00, 0x00, 0x00,
@@ -1919,7 +1998,7 @@ TEST compile_if_with_true_cond(Buffer *buf) {
                      // alternate:
                      // mov rax, compile (2)
                      0x48, 0xc7, 0xc0, 0x08, 0x00, 0x00, 0x00};
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
   ASSERT_EQ_FMT(Object_encode_integer(1), result, "0x%lx");
@@ -1929,7 +2008,7 @@ TEST compile_if_with_true_cond(Buffer *buf) {
 
 TEST compile_if_with_false_cond(Buffer *buf) {
   ASTNode *node = Reader_read("(if #f 1 2)");
-  int compile_result = Compile_function(buf, node);
+  int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
   byte expected[] = {
       // mov rax, 0x1f
@@ -1947,9 +2026,163 @@ TEST compile_if_with_false_cond(Buffer *buf) {
       0x48, 0xc7, 0xc0, 0x08, 0x00, 0x00, 0x00
       // end:
   };
-  EXPECT_FUNCTION_CONTAINS_CODE(buf, expected);
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
+  ASSERT_EQ_FMT(Object_encode_integer(2), result, "0x%lx");
+  AST_heap_free(node);
+  PASS();
+}
+
+TEST compile_nested_if(Buffer *buf) {
+  ASTNode *node = Reader_read("(if (< 1 2) (if #f 3 4) 5)");
+  int compile_result = Compile_entry(buf, node);
+  ASSERT_EQ(compile_result, 0);
+  Buffer_make_executable(buf);
+  uword result = Testing_execute_expr(buf);
+  ASSERT_EQ_FMT(Object_encode_integer(4), result, "0x%lx");
+  AST_heap_free(node);
+  PASS();
+}
+
+TEST compile_cons(Buffer *buf, uword *heap) {
+  ASTNode *node = Reader_read("(cons 1 2)");
+  int compile_result = Compile_entry(buf, node);
+  ASSERT_EQ(compile_result, 0);
+  // clang-format off
+  byte expected[] = {
+      // mov rax, 0x2
+      0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
+      // mov [rbp-8], rax
+      0x48, 0x89, 0x45, 0xf8,
+      // mov rax, 0x4
+      0x48, 0xc7, 0xc0, 0x08, 0x00, 0x00, 0x00,
+      // mov [rsi+Cdr], rax
+      0x48, 0x89, 0x46, 0x08,
+      // mov rax, [rbp-8]
+      0x48, 0x8b, 0x45, 0xf8,
+      // mov [rsi+Car], rax
+      0x48, 0x89, 0x46, 0x00,
+      // mov rax, rsi
+      0x48, 0x89, 0xf0,
+      // or rax, kPairTag
+      0x48, 0x83, 0xc8, 0x01,
+      // add rsi, 2*kWordSize
+      0x48, 0x81, 0xc6, 0x10, 0x00, 0x00, 0x00,
+  };
+  // clang-format on
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
+  Buffer_make_executable(buf);
+  uword result = Testing_execute_entry(buf, heap);
+  ASSERT(Object_is_pair(result));
+  ASSERT_EQ_FMT(Object_encode_integer(1), Object_pair_car(result), "0x%lx");
+  ASSERT_EQ_FMT(Object_encode_integer(2), Object_pair_cdr(result), "0x%lx");
+  AST_heap_free(node);
+  PASS();
+}
+
+TEST compile_two_cons(Buffer *buf, uword *heap) {
+  ASTNode *node = Reader_read(
+      "(let ((a (cons 1 2)) (b (cons 3 4))) (cons (cdr a) (cdr b)))");
+  int compile_result = Compile_entry(buf, node);
+  ASSERT_EQ(compile_result, 0);
+  Buffer_make_executable(buf);
+  uword result = Testing_execute_entry(buf, heap);
+  ASSERT(Object_is_pair(result));
+  ASSERT_EQ_FMT(Object_encode_integer(2), Object_pair_car(result), "0x%lx");
+  ASSERT_EQ_FMT(Object_encode_integer(4), Object_pair_cdr(result), "0x%lx");
+  AST_heap_free(node);
+  PASS();
+}
+
+TEST compile_nested_cons(Buffer *buf, uword *heap) {
+  ASTNode *node = Reader_read("(cons (cons 1 2) (cons 3 4))");
+  int compile_result = Compile_entry(buf, node);
+  ASSERT_EQ(compile_result, 0);
+  Buffer_make_executable(buf);
+  uword result = Testing_execute_entry(buf, heap);
+  ASSERT(Object_is_pair(result));
+  ASSERT(Object_is_pair(Object_pair_car(result)));
+  ASSERT_EQ_FMT(Object_encode_integer(1),
+                Object_pair_car(Object_pair_car(result)), "0x%lx");
+  ASSERT_EQ_FMT(Object_encode_integer(2),
+                Object_pair_cdr(Object_pair_car(result)), "0x%lx");
+  ASSERT(Object_is_pair(Object_pair_cdr(result)));
+  ASSERT_EQ_FMT(Object_encode_integer(3),
+                Object_pair_car(Object_pair_cdr(result)), "0x%lx");
+  ASSERT_EQ_FMT(Object_encode_integer(4),
+                Object_pair_cdr(Object_pair_cdr(result)), "0x%lx");
+  AST_heap_free(node);
+  PASS();
+}
+
+TEST compile_car(Buffer *buf, uword *heap) {
+  ASTNode *node = Reader_read("(car (cons 1 2))");
+  int compile_result = Compile_entry(buf, node);
+  ASSERT_EQ(compile_result, 0);
+  // clang-format off
+  byte expected[] = {
+      // mov rax, 0x2
+      0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
+      // mov [rbp-8], rax
+      0x48, 0x89, 0x45, 0xf8,
+      // mov rax, 0x4
+      0x48, 0xc7, 0xc0, 0x08, 0x00, 0x00, 0x00,
+      // mov [rsi+Cdr], rax
+      0x48, 0x89, 0x46, 0x08,
+      // mov rax, [rbp-8]
+      0x48, 0x8b, 0x45, 0xf8,
+      // mov [rsi+Car], rax
+      0x48, 0x89, 0x46, 0x00,
+      // mov rax, rsi
+      0x48, 0x89, 0xf0,
+      // or rax, kPairTag
+      0x48, 0x83, 0xc8, 0x01,
+      // add rsi, 2*kWordSize
+      0x48, 0x81, 0xc6, 0x10, 0x00, 0x00, 0x00,
+      // mov rax, [rax-1]
+      0x48, 0x8b, 0x40, 0xff,
+  };
+  // clang-format on
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
+  Buffer_make_executable(buf);
+  uword result = Testing_execute_entry(buf, heap);
+  ASSERT_EQ_FMT(Object_encode_integer(1), result, "0x%lx");
+  AST_heap_free(node);
+  PASS();
+}
+
+TEST compile_cdr(Buffer *buf, uword *heap) {
+  ASTNode *node = Reader_read("(cdr (cons 1 2))");
+  int compile_result = Compile_entry(buf, node);
+  ASSERT_EQ(compile_result, 0);
+  // clang-format off
+  byte expected[] = {
+      // mov rax, 0x2
+      0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
+      // mov [rbp-8], rax
+      0x48, 0x89, 0x45, 0xf8,
+      // mov rax, 0x4
+      0x48, 0xc7, 0xc0, 0x08, 0x00, 0x00, 0x00,
+      // mov [rsi+Cdr], rax
+      0x48, 0x89, 0x46, 0x08,
+      // mov rax, [rbp-8]
+      0x48, 0x8b, 0x45, 0xf8,
+      // mov [rsi+Car], rax
+      0x48, 0x89, 0x46, 0x00,
+      // mov rax, rsi
+      0x48, 0x89, 0xf0,
+      // or rax, kPairTag
+      0x48, 0x83, 0xc8, 0x01,
+      // add rsi, 2*kWordSize
+      0x48, 0x81, 0xc6, 0x10, 0x00, 0x00, 0x00,
+      // mov rax, [rax+7]
+      0x48, 0x8b, 0x40, 0x07,
+  };
+  // clang-format on
+  EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
+  Buffer_make_executable(buf);
+  uword result = Testing_execute_entry(buf, heap);
   ASSERT_EQ_FMT(Object_encode_integer(2), result, "0x%lx");
   AST_heap_free(node);
   PASS();
@@ -2036,6 +2269,12 @@ SUITE(compiler_tests) {
   RUN_BUFFER_TEST(compile_let_is_not_let_star);
   RUN_BUFFER_TEST(compile_if_with_true_cond);
   RUN_BUFFER_TEST(compile_if_with_false_cond);
+  RUN_BUFFER_TEST(compile_nested_if);
+  RUN_HEAP_TEST(compile_cons);
+  RUN_HEAP_TEST(compile_two_cons);
+  RUN_HEAP_TEST(compile_nested_cons);
+  RUN_HEAP_TEST(compile_car);
+  RUN_HEAP_TEST(compile_cdr);
 }
 // End Tests
 
@@ -2102,7 +2341,13 @@ void print_assembly(char *line) {
   Buffer_deinit(&buf);
 }
 
+uword *heap = NULL;
+
 void evaluate_expr(char *line) {
+  if (!heap) {
+    heap = malloc(1000 * kWordSize);
+  }
+
   // Parse the line
   ASTNode *node = Reader_read(line);
   if (AST_is_error(node)) {
@@ -2113,7 +2358,7 @@ void evaluate_expr(char *line) {
   // Compile the line
   Buffer buf;
   Buffer_init(&buf, 1);
-  int compile_result = Compile_function(&buf, node);
+  int compile_result = Compile_entry(&buf, node);
   AST_heap_free(node);
   if (compile_result < 0) {
     fprintf(stderr, "Compile error.\n");
@@ -2123,7 +2368,7 @@ void evaluate_expr(char *line) {
 
   // Execute the code
   Buffer_make_executable(&buf);
-  uword result = Testing_execute_expr(&buf);
+  uword result = Testing_execute_entry(&buf, heap);
 
   // Print the result
   print_value(result);
@@ -2143,6 +2388,7 @@ int repl(REPL_Callback callback) {
     if (nchars < 0) {
       fprintf(stderr, "Goodbye.\n");
       free(line);
+      free(heap);
       break;
     }
 
