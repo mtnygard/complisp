@@ -418,10 +418,31 @@ Indirect Ind(Register reg, int8_t disp) {
 
 static const byte kRexPrefix = 0x48;
 
+typedef enum { Scale1 = 0, Scale2, Scale4, Scale8 } Scale;
+
+typedef enum {
+  kIndexRax = 0,
+  kIndexRcx,
+  kIndexRdx,
+  kIndexRbx,
+  kIndexNone,
+  kIndexRbp,
+  kIndexRsi,
+  kIndexRdi
+} Index;
+
+byte sib(Register base, Index index, Scale scale) {
+  return ((scale & 0x3) << 6) | ((index & 0x7) << 3) | (base & 0x7);
+}
+
+byte modrm(byte mod, byte rm, byte reg) {
+  return ((mod & 0x3) << 6) | ((reg & 0x7) << 3) | (rm & 0x7);
+}
+
 void Emit_mov_reg_imm32(Buffer *buf, Register dst, int32_t src) {
   Buffer_write8(buf, kRexPrefix);
   Buffer_write8(buf, 0xc7);
-  Buffer_write8(buf, 0xc0 + dst);
+  Buffer_write8(buf, modrm(3, dst, 0));
   Buffer_write32(buf, src);
 }
 
@@ -515,7 +536,12 @@ static uint32_t disp32(int32_t disp) {
 void Emit_store_reg_indirect(Buffer *buf, Indirect dst, Register src) {
   Buffer_write8(buf, kRexPrefix);
   Buffer_write8(buf, 0x89);
-  Buffer_write8(buf, 0x40 + src * 8 + dst.reg);
+  if (dst.reg == kRsp) {
+    Buffer_write8(buf, modrm(1, dst.reg, src));
+    Buffer_write8(buf, sib(kRsp, kIndexNone, Scale1));
+  } else {
+    Buffer_write8(buf, modrm(1, dst.reg, src));
+  }
   Buffer_write8(buf, disp8(dst.disp));
 }
 
