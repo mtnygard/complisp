@@ -1,3 +1,6 @@
+// vim: set tabstop=2 shiftwidth=2 textwidth=79 expandtab:
+// gcc -O2 -g -Wall -Wextra -pedantic -fno-strict-aliasing
+
 #define _GNU_SOURCE
 #include <assert.h>   // for assert
 #include <stdbool.h>  // for bool
@@ -446,12 +449,6 @@ void Emit_mov_reg_imm32(Buffer *buf, Register dst, int32_t src) {
   Buffer_write32(buf, src);
 }
 
-void Emit_mov_reg_reg(Buffer *buf, Register dst, Register src) {
-  Buffer_write8(buf, kRexPrefix);
-  Buffer_write8(buf, 0x89);
-  Buffer_write8(buf, 0xc0 + src * 8 + dst);
-}
-
 void Emit_ret(Buffer *buf) { Buffer_write8(buf, 0xc3); }
 
 void Emit_add_reg_imm32(Buffer *buf, Register dst, int32_t src) {
@@ -462,7 +459,7 @@ void Emit_add_reg_imm32(Buffer *buf, Register dst, int32_t src) {
     Buffer_write8(buf, 0x05);
   } else {
     Buffer_write8(buf, 0x81);
-    Buffer_write8(buf, 0xc0 + dst);
+    Buffer_write8(buf, modrm(3, dst, 0));
   }
   Buffer_write32(buf, src);
 }
@@ -475,7 +472,7 @@ void Emit_sub_reg_imm32(Buffer *buf, Register dst, int32_t src) {
     Buffer_write8(buf, 0x2d);
   } else {
     Buffer_write8(buf, 0x81);
-    Buffer_write8(buf, 0xe8 + dst);
+    Buffer_write8(buf, modrm(3, dst, 5));
   }
   Buffer_write32(buf, src);
 }
@@ -483,28 +480,28 @@ void Emit_sub_reg_imm32(Buffer *buf, Register dst, int32_t src) {
 void Emit_shl_reg_imm8(Buffer *buf, Register dst, int8_t bits) {
   Buffer_write8(buf, kRexPrefix);
   Buffer_write8(buf, 0xc1);
-  Buffer_write8(buf, 0xe0 + dst);
+  Buffer_write8(buf, modrm(3, dst, 4));
   Buffer_write8(buf, bits);
 }
 
 void Emit_shr_reg_imm8(Buffer *buf, Register dst, int8_t bits) {
   Buffer_write8(buf, kRexPrefix);
   Buffer_write8(buf, 0xc1);
-  Buffer_write8(buf, 0xe8 + dst);
+  Buffer_write8(buf, modrm(3, dst, 5));
   Buffer_write8(buf, bits);
 }
 
 void Emit_or_reg_imm8(Buffer *buf, Register dst, uint8_t tag) {
   Buffer_write8(buf, kRexPrefix);
   Buffer_write8(buf, 0x83);
-  Buffer_write8(buf, 0xc8 + dst);
+  Buffer_write8(buf, modrm(3, dst, 1));
   Buffer_write8(buf, tag);
 }
 
 void Emit_and_reg_imm8(Buffer *buf, Register dst, uint8_t tag) {
   Buffer_write8(buf, kRexPrefix);
   Buffer_write8(buf, 0x83);
-  Buffer_write8(buf, 0xe0 + dst);
+  Buffer_write8(buf, modrm(3, dst, 4));
   Buffer_write8(buf, tag);
 }
 
@@ -515,7 +512,7 @@ void Emit_cmp_reg_imm32(Buffer *buf, Register left, int32_t right) {
     Buffer_write8(buf, 0x3d);
   } else {
     Buffer_write8(buf, 0x81);
-    Buffer_write8(buf, 0xf8 + left);
+    Buffer_write8(buf, modrm(3, left, 7));
   }
   Buffer_write32(buf, right);
 }
@@ -523,7 +520,7 @@ void Emit_cmp_reg_imm32(Buffer *buf, Register left, int32_t right) {
 void Emit_setcc_imm8(Buffer *buf, Condition cond, PartialRegister dst) {
   Buffer_write8(buf, 0x0f);
   Buffer_write8(buf, 0x90 + cond);
-  Buffer_write8(buf, 0xc0 + dst);
+  Buffer_write8(buf, 0xc0 + (dst & 0x7));
 }
 
 uint8_t disp8(int8_t disp) { return disp >= 0 ? disp : 0x100 + disp; }
@@ -532,69 +529,68 @@ static uint32_t disp32(int32_t disp) {
   return disp >= 0 ? disp : 0x100000000 + disp;
 }
 
+void Emit_address_disp8(Buffer *buf, Register direct, Indirect indirect) {
+  if (indirect.reg == kRsp) {
+    Buffer_write8(buf, modrm(1, kIndexNone, direct));
+    Buffer_write8(buf, sib(kRsp, kIndexNone, Scale1));
+  } else {
+    Buffer_write8(buf, modrm(1, indirect.reg, direct));
+  }
+  Buffer_write8(buf, disp8(indirect.disp));
+}
+
 // mov [dst+disp], src
 void Emit_store_reg_indirect(Buffer *buf, Indirect dst, Register src) {
   Buffer_write8(buf, kRexPrefix);
   Buffer_write8(buf, 0x89);
-  if (dst.reg == kRsp) {
-    Buffer_write8(buf, modrm(1, dst.reg, src));
-    Buffer_write8(buf, sib(kRsp, kIndexNone, Scale1));
-  } else {
-    Buffer_write8(buf, modrm(1, dst.reg, src));
-  }
-  Buffer_write8(buf, disp8(dst.disp));
+  Emit_address_disp8(buf, src, dst);
 }
 
 // add dst, [src+disp]
 void Emit_add_reg_indirect(Buffer *buf, Register dst, Indirect src) {
   Buffer_write8(buf, kRexPrefix);
   Buffer_write8(buf, 0x03);
-  Buffer_write8(buf, 0x40 + dst * 8 + src.reg);
-  Buffer_write8(buf, disp8(src.disp));
+  Emit_address_disp8(buf, dst, src);
 }
 
 // sub dst, [src+disp]
 void Emit_sub_reg_indirect(Buffer *buf, Register dst, Indirect src) {
   Buffer_write8(buf, kRexPrefix);
   Buffer_write8(buf, 0x2b);
-  Buffer_write8(buf, 0x40 + dst * 8 + src.reg);
-  Buffer_write8(buf, disp8(src.disp));
+  Emit_address_disp8(buf, dst, src);
 }
 
 // mul rax, [src+disp]
 void Emit_mul_reg_indirect(Buffer *buf, Indirect src) {
   Buffer_write8(buf, kRexPrefix);
   Buffer_write8(buf, 0xf7);
-  Buffer_write8(buf, 0x60 + src.reg);
-  Buffer_write8(buf, disp8(src.disp));
+  Emit_address_disp8(buf, 4, src);
 }
 
 // cmp left, [right+disp]
 void Emit_cmp_reg_indirect(Buffer *buf, Register left, Indirect right) {
   Buffer_write8(buf, kRexPrefix);
   Buffer_write8(buf, 0x3b);
-  Buffer_write8(buf, 0x40 + left * 8 + right.reg);
-  Buffer_write8(buf, disp8(right.disp));
+  Emit_address_disp8(buf, left, right);
 }
 
 // mov dst, [src+disp]
 void Emit_load_reg_indirect(Buffer *buf, Register dst, Indirect src) {
   Buffer_write8(buf, kRexPrefix);
   Buffer_write8(buf, 0x8b);
-  Buffer_write8(buf, 0x40 + dst * 8 + src.reg);
-  Buffer_write8(buf, disp8(src.disp));
-}
-
-word Emit_jmp(Buffer *buf, int32_t offset) {
-  Buffer_write8(buf, 0xe9);
-  word pos = Buffer_len(buf);
-  Buffer_write32(buf, disp32(offset));
-  return pos;
+  Emit_address_disp8(buf, dst, src);
 }
 
 word Emit_jcc(Buffer *buf, Condition cond, int32_t offset) {
   Buffer_write8(buf, 0x0f);
   Buffer_write8(buf, 0x80 + cond);
+  word pos = Buffer_len(buf);
+  Buffer_write32(buf, disp32(offset));
+  return pos;
+}
+
+word Emit_jmp(Buffer *buf, int32_t offset) {
+  Buffer_write8(buf, 0xe9);
   word pos = Buffer_len(buf);
   Buffer_write32(buf, disp32(offset));
   return pos;
@@ -606,12 +602,32 @@ void Emit_backpatch_imm32(Buffer *buf, int32_t target_pos) {
   Buffer_at_put32(buf, target_pos, disp32(relative_pos));
 }
 
+void Emit_mov_reg_reg(Buffer *buf, Register dst, Register src) {
+  Buffer_write8(buf, kRexPrefix);
+  Buffer_write8(buf, 0x89);
+  Buffer_write8(buf, modrm(3, dst, src));
+}
+
+void Emit_rsp_adjust(Buffer *buf, word adjust) {
+  if (adjust < 0) {
+    Emit_sub_reg_imm32(buf, kRsp, -adjust);
+  } else if (adjust > 0) {
+    Emit_add_reg_imm32(buf, kRsp, adjust);
+  }
+}
+
+void Emit_call_imm32(Buffer *buf, word absolute_address) {
+  word relative_address = absolute_address - (Buffer_len(buf) + 5);
+  Buffer_write8(buf, 0xe8);
+  Buffer_write32(buf, relative_address);
+}
+
 // Compile
 
 int Compile_call(Buffer *buf, ASTNode *callable, ASTNode *args,
-                 word stack_index, Env *varenv);
+                 word stack_index, Env *varenv, Env *labels);
 int Compile_let(Buffer *buf, ASTNode *bindings, ASTNode *body, word stack_index,
-                Env *binding_env, Env *body_env);
+                Env *binding_env, Env *body_env, Env *labels);
 void Compile_compare_imm32(Buffer *buf, int32_t value);
 
 ASTNode *operand1(ASTNode *args) { return AST_pair_car(args); }
@@ -629,7 +645,8 @@ ASTNode *operand3(ASTNode *args) {
       return result;                                                           \
   } while (0)
 
-int Compile_expr(Buffer *buf, ASTNode *node, word stack_index, Env *varenv) {
+int Compile_expr(Buffer *buf, ASTNode *node, word stack_index, Env *varenv,
+                 Env *labels) {
   if (AST_is_integer(node)) {
     word value = AST_get_integer(node);
     Emit_mov_reg_imm32(buf, kRax, Object_encode_integer(value));
@@ -651,13 +668,13 @@ int Compile_expr(Buffer *buf, ASTNode *node, word stack_index, Env *varenv) {
   }
   if (AST_is_pair(node)) {
     return Compile_call(buf, AST_pair_car(node), AST_pair_cdr(node),
-                        stack_index, varenv);
+                        stack_index, varenv, labels);
   }
   if (AST_is_symbol(node)) {
     const char *symbol = AST_symbol_cstr(node);
     word value;
     if (Env_find(varenv, symbol, &value)) {
-      Emit_load_reg_indirect(buf, kRax, Ind(kRbp, value));
+      Emit_load_reg_indirect(buf, kRax, Ind(kRsp, value));
       return 0;
     }
     return -1;
@@ -668,14 +685,14 @@ int Compile_expr(Buffer *buf, ASTNode *node, word stack_index, Env *varenv) {
 const int32_t kLabelPlaceholder = 0xdeadbeef;
 
 int Compile_if(Buffer *buf, ASTNode *cond, ASTNode *consequent,
-               ASTNode *alternate, word stack_index, Env *varenv) {
-  _(Compile_expr(buf, cond, stack_index, varenv));
+               ASTNode *alternate, word stack_index, Env *varenv, Env *labels) {
+  _(Compile_expr(buf, cond, stack_index, varenv, labels));
   Emit_cmp_reg_imm32(buf, kRax, Object_false());
   word alternate_pos = Emit_jcc(buf, kEqual, kLabelPlaceholder);
-  _(Compile_expr(buf, consequent, stack_index, varenv));
+  _(Compile_expr(buf, consequent, stack_index, varenv, labels));
   word end_pos = Emit_jmp(buf, kLabelPlaceholder);
   Emit_backpatch_imm32(buf, alternate_pos);
-  _(Compile_expr(buf, alternate, stack_index, varenv));
+  _(Compile_expr(buf, alternate, stack_index, varenv, labels));
   Emit_backpatch_imm32(buf, end_pos);
   return 0;
 }
@@ -683,12 +700,12 @@ int Compile_if(Buffer *buf, ASTNode *cond, ASTNode *consequent,
 const Register kHeapPointer = kRsi;
 
 int Compile_cons(Buffer *buf, ASTNode *car, ASTNode *cdr, int stack_index,
-                 Env *varenv) {
+                 Env *varenv, Env *labels) {
   // Compile and store car on the stack
-  _(Compile_expr(buf, car, stack_index, varenv));
+  _(Compile_expr(buf, car, stack_index, varenv, labels));
   Emit_store_reg_indirect(buf, Ind(kRbp, stack_index), kRax);
   // Compile and store cdr
-  _(Compile_expr(buf, cdr, stack_index - kWordSize, varenv));
+  _(Compile_expr(buf, cdr, stack_index - kWordSize, varenv, labels));
   Emit_store_reg_indirect(buf, Ind(kHeapPointer, kCdrOffset), kRax);
   // Fetch car and store in heap
   Emit_load_reg_indirect(buf, kRax, Ind(kRbp, stack_index));
@@ -702,54 +719,95 @@ int Compile_cons(Buffer *buf, ASTNode *car, ASTNode *cdr, int stack_index,
   return 0;
 }
 
+word list_length(ASTNode *node) {
+  if (AST_is_nil(node)) {
+    return 0;
+  }
+  assert(AST_is_pair(node));
+  return 1 + list_length(AST_pair_cdr(node));
+}
+
+int Compile_labelcall(Buffer *buf, ASTNode *callable, ASTNode *args,
+                      word stack_index, Env *varenv, Env *labels, word nargs,
+                      word rsp_adjust) {
+  if (AST_is_nil(args)) {
+    const char *symbol = AST_symbol_cstr(callable);
+    word code_address;
+    if (!Env_find(labels, symbol, &code_address)) {
+      return -1;
+    }
+    Emit_rsp_adjust(buf, rsp_adjust);
+    Emit_call_imm32(buf, code_address);
+    Emit_rsp_adjust(buf, -rsp_adjust);
+    return 0;
+  }
+
+  assert(AST_is_pair(args));
+  ASTNode *arg = AST_pair_car(args);
+  _(Compile_expr(buf, arg, stack_index, varenv, labels));
+  Emit_store_reg_indirect(buf, Ind(kRsp, stack_index), kRax);
+  return Compile_labelcall(buf, callable, AST_pair_cdr(args),
+                           stack_index - kWordSize, varenv, labels, nargs,
+                           rsp_adjust);
+}
+
 int Compile_call(Buffer *buf, ASTNode *callable, ASTNode *args,
-                 word stack_index, Env *varenv) {
+                 word stack_index, Env *varenv, Env *labels) {
   if (AST_is_symbol(callable)) {
+    if (AST_symbol_matches(callable, "labelcall")) {
+      ASTNode *label = operand1(args);
+      assert(AST_is_symbol(label));
+      ASTNode *call_args = AST_pair_cdr(args);
+      word nargs = list_length(call_args);
+
+      return Compile_labelcall(buf, label, call_args, stack_index - kWordSize,
+                               varenv, labels, nargs, stack_index + kWordSize);
+    }
     if (AST_symbol_matches(callable, "let")) {
       return Compile_let(buf, operand1(args), operand2(args), stack_index,
-                         varenv, varenv);
+                         varenv, varenv, labels);
     }
     if (AST_symbol_matches(callable, "if")) {
       return Compile_if(buf, operand1(args), operand2(args), operand3(args),
-                        stack_index, varenv);
+                        stack_index, varenv, labels);
     }
     if (AST_symbol_matches(callable, "cons")) {
       return Compile_cons(buf, operand1(args), operand2(args), stack_index,
-                          varenv);
+                          varenv, labels);
     }
     if (AST_symbol_matches(callable, "car")) {
-      _(Compile_expr(buf, operand1(args), stack_index, varenv));
+      _(Compile_expr(buf, operand1(args), stack_index, varenv, labels));
       Emit_load_reg_indirect(buf, kRax, Ind(kRax, kCarOffset - kPairTag));
       return 0;
     }
     if (AST_symbol_matches(callable, "cdr")) {
-      _(Compile_expr(buf, operand1(args), stack_index, varenv));
+      _(Compile_expr(buf, operand1(args), stack_index, varenv, labels));
       Emit_load_reg_indirect(buf, kRax, Ind(kRax, kCdrOffset - kPairTag));
       return 0;
     }
     if (AST_symbol_matches(callable, "add1")) {
-      _(Compile_expr(buf, operand1(args), stack_index, varenv));
+      _(Compile_expr(buf, operand1(args), stack_index, varenv, labels));
       Emit_add_reg_imm32(buf, kRax, Object_encode_integer(1));
       return 0;
     }
     if (AST_symbol_matches(callable, "sub1")) {
-      _(Compile_expr(buf, operand1(args), stack_index, varenv));
+      _(Compile_expr(buf, operand1(args), stack_index, varenv, labels));
       Emit_sub_reg_imm32(buf, kRax, Object_encode_integer(1));
       return 0;
     }
     if (AST_symbol_matches(callable, "integer->char")) {
-      _(Compile_expr(buf, operand1(args), stack_index, varenv));
+      _(Compile_expr(buf, operand1(args), stack_index, varenv, labels));
       Emit_shl_reg_imm8(buf, kRax, kCharShift - kIntegerShift);
       Emit_or_reg_imm8(buf, kRax, kCharTag);
       return 0;
     }
     if (AST_symbol_matches(callable, "char->integer")) {
-      _(Compile_expr(buf, operand1(args), stack_index, varenv));
+      _(Compile_expr(buf, operand1(args), stack_index, varenv, labels));
       Emit_shr_reg_imm8(buf, kRax, kCharShift - kIntegerShift);
       return 0;
     }
     if (AST_symbol_matches(callable, "nil?")) {
-      _(Compile_expr(buf, operand1(args), stack_index, varenv));
+      _(Compile_expr(buf, operand1(args), stack_index, varenv, labels));
       Emit_cmp_reg_imm32(buf, kRax, Object_nil());
       Emit_mov_reg_imm32(buf, kRax, 0);
       Emit_setcc_imm8(buf, kEqual, kAl);
@@ -758,56 +816,60 @@ int Compile_call(Buffer *buf, ASTNode *callable, ASTNode *args,
       return 0;
     }
     if (AST_symbol_matches(callable, "zero?")) {
-      _(Compile_expr(buf, operand1(args), stack_index, varenv));
+      _(Compile_expr(buf, operand1(args), stack_index, varenv, labels));
       Compile_compare_imm32(buf, Object_encode_integer(0));
       return 0;
     }
     if (AST_symbol_matches(callable, "not")) {
-      _(Compile_expr(buf, operand1(args), stack_index, varenv));
+      _(Compile_expr(buf, operand1(args), stack_index, varenv, labels));
       Compile_compare_imm32(buf, Object_false());
       return 0;
     }
     if (AST_symbol_matches(callable, "integer?")) {
-      _(Compile_expr(buf, operand1(args), stack_index, varenv));
+      _(Compile_expr(buf, operand1(args), stack_index, varenv, labels));
       Emit_and_reg_imm8(buf, kRax, kIntegerTagMask);
       Compile_compare_imm32(buf, kIntegerTag);
       return 0;
     }
     if (AST_symbol_matches(callable, "boolean?")) {
-      _(Compile_expr(buf, operand1(args), stack_index, varenv));
+      _(Compile_expr(buf, operand1(args), stack_index, varenv, labels));
       Emit_and_reg_imm8(buf, kRax, kImmediateTagMask);
       Compile_compare_imm32(buf, kBoolTag);
       return 0;
     }
     if (AST_symbol_matches(callable, "+")) {
-      _(Compile_expr(buf, operand2(args), stack_index, varenv));
-      Emit_store_reg_indirect(buf, Ind(kRbp, stack_index), kRax);
-      _(Compile_expr(buf, operand1(args), stack_index - kWordSize, varenv));
-      Emit_add_reg_indirect(buf, kRax, Ind(kRbp, stack_index));
+      _(Compile_expr(buf, operand2(args), stack_index, varenv, labels));
+      Emit_store_reg_indirect(buf, Ind(kRsp, stack_index), kRax);
+      _(Compile_expr(buf, operand1(args), stack_index - kWordSize, varenv,
+                     labels));
+      Emit_add_reg_indirect(buf, kRax, Ind(kRsp, stack_index));
       return 0;
     }
     if (AST_symbol_matches(callable, "-")) {
-      _(Compile_expr(buf, operand2(args), stack_index, varenv));
-      Emit_store_reg_indirect(buf, Ind(kRbp, stack_index), kRax);
-      _(Compile_expr(buf, operand1(args), stack_index - kWordSize, varenv));
-      Emit_sub_reg_indirect(buf, kRax, Ind(kRbp, stack_index));
+      _(Compile_expr(buf, operand2(args), stack_index, varenv, labels));
+      Emit_store_reg_indirect(buf, Ind(kRsp, stack_index), kRax);
+      _(Compile_expr(buf, operand1(args), stack_index - kWordSize, varenv,
+                     labels));
+      Emit_sub_reg_indirect(buf, kRax, Ind(kRsp, stack_index));
       return 0;
     }
     if (AST_symbol_matches(callable, "*")) {
-      _(Compile_expr(buf, operand2(args), stack_index, varenv));
+      _(Compile_expr(buf, operand2(args), stack_index, varenv, labels));
       // Remove the tag so that the result is still only tagged with 0b00
       // instead of 0b0000
       Emit_shr_reg_imm8(buf, kRax, kIntegerShift);
-      Emit_store_reg_indirect(buf, Ind(kRbp, stack_index), kRax);
-      _(Compile_expr(buf, operand1(args), stack_index - kWordSize, varenv));
-      Emit_mul_reg_indirect(buf, Ind(kRbp, stack_index));
+      Emit_store_reg_indirect(buf, Ind(kRsp, stack_index), kRax);
+      _(Compile_expr(buf, operand1(args), stack_index - kWordSize, varenv,
+                     labels));
+      Emit_mul_reg_indirect(buf, Ind(kRsp, stack_index));
       return 0;
     }
     if (AST_symbol_matches(callable, "=")) {
-      _(Compile_expr(buf, operand2(args), stack_index, varenv));
-      Emit_store_reg_indirect(buf, Ind(kRbp, stack_index), kRax);
-      _(Compile_expr(buf, operand1(args), stack_index - kWordSize, varenv));
-      Emit_cmp_reg_indirect(buf, kRax, Ind(kRbp, stack_index));
+      _(Compile_expr(buf, operand2(args), stack_index, varenv, labels));
+      Emit_store_reg_indirect(buf, Ind(kRsp, stack_index), kRax);
+      _(Compile_expr(buf, operand1(args), stack_index - kWordSize, varenv,
+                     labels));
+      Emit_cmp_reg_indirect(buf, kRax, Ind(kRsp, stack_index));
       Emit_mov_reg_imm32(buf, kRax, 0);
       Emit_setcc_imm8(buf, kEqual, kAl);
       Emit_shl_reg_imm8(buf, kRax, kBoolShift);
@@ -815,10 +877,11 @@ int Compile_call(Buffer *buf, ASTNode *callable, ASTNode *args,
       return 0;
     }
     if (AST_symbol_matches(callable, "<")) {
-      _(Compile_expr(buf, operand2(args), stack_index, varenv));
-      Emit_store_reg_indirect(buf, Ind(kRbp, stack_index), kRax);
-      _(Compile_expr(buf, operand1(args), stack_index - kWordSize, varenv));
-      Emit_cmp_reg_indirect(buf, kRax, Ind(kRbp, stack_index));
+      _(Compile_expr(buf, operand2(args), stack_index, varenv, labels));
+      Emit_store_reg_indirect(buf, Ind(kRsp, stack_index), kRax);
+      _(Compile_expr(buf, operand1(args), stack_index - kWordSize, varenv,
+                     labels));
+      Emit_cmp_reg_indirect(buf, kRax, Ind(kRsp, stack_index));
       Emit_mov_reg_imm32(buf, kRax, 0);
       Emit_setcc_imm8(buf, kLess, kAl);
       Emit_shl_reg_imm8(buf, kRax, kBoolShift);
@@ -830,10 +893,10 @@ int Compile_call(Buffer *buf, ASTNode *callable, ASTNode *args,
 }
 
 int Compile_let(Buffer *buf, ASTNode *bindings, ASTNode *body, word stack_index,
-                Env *binding_env, Env *body_env) {
+                Env *binding_env, Env *body_env, Env *labels) {
   if (AST_is_nil(bindings)) {
     // Base case: no bindings (or none left)
-    _(Compile_expr(buf, body, stack_index, body_env));
+    _(Compile_expr(buf, body, stack_index, body_env, labels));
     return 0;
   }
   assert(AST_is_pair(bindings));
@@ -843,39 +906,96 @@ int Compile_let(Buffer *buf, ASTNode *bindings, ASTNode *body, word stack_index,
   assert(AST_is_symbol(name));
   ASTNode *binding_expr = AST_pair_car(AST_pair_cdr(binding));
   // Evaluate the RHS, store result on stack
-  _(Compile_expr(buf, binding_expr, stack_index, binding_env));
-  Emit_store_reg_indirect(buf, Ind(kRbp, stack_index), kRax);
+  _(Compile_expr(buf, binding_expr, stack_index, binding_env, labels));
+  Emit_store_reg_indirect(buf, Ind(kRsp, stack_index), kRax);
   // Bind the name to a stack offset
   Env entry = Env_bind(AST_symbol_cstr(name), stack_index, body_env);
   _(Compile_let(buf, AST_pair_cdr(bindings), body, stack_index - kWordSize,
-                binding_env, &entry));
+                binding_env, &entry, labels));
   return 0;
 }
 
-static const byte kFunctionPrologue[] = {
+static const byte kEntryPrologue[] = {
     // Save the heap in rsi, our global heap pointer
     // mov rsi, rdi
     kRexPrefix,
     0x89,
     0xfe,
-    // push rbp
-    0x55,
-    // mov rbp, rsp
-    kRexPrefix,
-    0x89,
-    0xe5,
 };
 
 static const byte kFunctionEpilogue[] = {
-    // pop rbp
-    0x5d,
     // ret
     0xc3,
 };
 
+int Compile_code_impl(Buffer *buf, ASTNode *formals, ASTNode *body,
+                      word stack_index, Env *varenv) {
+  if (AST_is_nil(formals)) {
+    _(Compile_expr(buf, body, stack_index, varenv, NULL));
+    Buffer_write_arr(buf, kFunctionEpilogue, sizeof kFunctionEpilogue);
+    return 0;
+  }
+
+  assert(AST_is_pair(formals));
+  ASTNode *name = AST_pair_car(formals);
+  assert(AST_is_symbol(name));
+  Env entry = Env_bind(AST_symbol_cstr(name), stack_index, varenv);
+  return Compile_code_impl(buf, AST_pair_cdr(formals), body,
+                           stack_index - kWordSize, &entry);
+}
+
+int Compile_code(Buffer *buf, ASTNode *code) {
+  assert(AST_is_pair(code));
+  ASTNode *code_sym = AST_pair_car(code);
+  assert(AST_is_symbol(code_sym));
+  assert(AST_symbol_matches(code_sym, "code"));
+  ASTNode *formals = AST_pair_car(AST_pair_cdr(code));
+  ASTNode *code_body = AST_pair_car(AST_pair_cdr(AST_pair_cdr(code)));
+  return Compile_code_impl(buf, formals, code_body, -kWordSize, NULL);
+}
+
+int Compile_labels(Buffer *buf, ASTNode *bindings, ASTNode *body, Env *labels,
+                   word body_pos) {
+  if (AST_is_nil(bindings)) {
+    Emit_backpatch_imm32(buf, body_pos);
+    // Base case: no bindings; compile the body
+    _(Compile_expr(buf, body, -kWordSize, NULL, labels));
+    Buffer_write_arr(buf, kFunctionEpilogue, sizeof kFunctionEpilogue);
+    return 0;
+  }
+
+  assert(AST_is_pair(bindings));
+  // Get the next binding
+  ASTNode *binding = AST_pair_car(bindings);
+  ASTNode *name = AST_pair_car(binding);
+  assert(AST_is_symbol(name));
+  ASTNode *binding_code = AST_pair_car(AST_pair_cdr(binding));
+  word function_location = Buffer_len(buf);
+  // Compile the binding function
+  _(Compile_code(buf, binding_code));
+  // Bind the name to the location in the instruction strema
+  Env entry = Env_bind(AST_symbol_cstr(name), function_location, labels);
+  _(Compile_labels(buf, AST_pair_cdr(bindings), body, &entry, body_pos));
+  return 0;
+}
+
 WARN_UNUSED int Compile_entry(Buffer *buf, ASTNode *node) {
-  Buffer_write_arr(buf, kFunctionPrologue, sizeof kFunctionPrologue);
-  _(Compile_expr(buf, node, -kWordSize, NULL));
+  Buffer_write_arr(buf, kEntryPrologue, sizeof kEntryPrologue);
+  if (AST_is_pair(node)) {
+    // Assume it's (labels ...)
+    ASTNode *labels_sym = AST_pair_car(node);
+    if (AST_is_symbol(labels_sym) && AST_symbol_matches(labels_sym, "labels")) {
+      // Jump to body
+      word body_pos = Emit_jmp(buf, kLabelPlaceholder);
+      ASTNode *bindings = AST_pair_car(AST_pair_cdr(node));
+      assert(AST_is_pair(bindings) || AST_is_nil(bindings));
+      ASTNode *body = AST_pair_car(AST_pair_cdr(AST_pair_cdr(node)));
+      _(Compile_labels(buf, bindings, body, /*labels=*/NULL, body_pos));
+      return 0;
+    }
+  }
+  _(Compile_expr(buf, node, /*stack_index=*/-kWordSize, /*varenv=*/NULL,
+                 /*labels=*/NULL));
   Buffer_write_arr(buf, kFunctionEpilogue, sizeof kFunctionEpilogue);
   return 0;
 }
@@ -1034,12 +1154,12 @@ uword Testing_execute_expr(Buffer *buf) {
 TEST Testing_expect_entry_has_contents(Buffer *buf, byte *arr,
                                        size_t arr_size) {
   size_t total_size =
-      sizeof kFunctionPrologue + arr_size + sizeof kFunctionEpilogue;
+      sizeof kEntryPrologue + arr_size + sizeof kFunctionEpilogue;
   ASSERT_EQ_FMT(total_size, Buffer_len(buf), "%ld");
 
   byte *ptr = buf->address;
-  ASSERT_MEM_EQ(kFunctionPrologue, ptr, sizeof kFunctionPrologue);
-  ptr += sizeof kFunctionPrologue;
+  ASSERT_MEM_EQ(kEntryPrologue, ptr, sizeof kEntryPrologue);
+  ptr += sizeof kEntryPrologue;
   ASSERT_MEM_EQ(arr, ptr, arr_size);
   ptr += arr_size;
   ASSERT_MEM_EQ(kFunctionEpilogue, ptr, sizeof kFunctionEpilogue);
@@ -1734,15 +1854,17 @@ TEST compile_binary_plus(Buffer *buf) {
   ASTNode *node = new_binary_call("+", AST_new_integer(5), AST_new_integer(8));
   int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
+  // clang-format off
   byte expected[] = {
-      // 0:  48 c7 c0 20 00 00 00    mov    rax,0x20
+      // mov    rax,0x20
       0x48, 0xc7, 0xc0, 0x20, 0x00, 0x00, 0x00,
-      // 7:  48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
-      0x48, 0x89, 0x45, 0xf8,
-      // b:  48 c7 c0 14 00 00 00    mov    rax,0x14
+      // mov    QWORD PTR [rsp-0x8],rax
+      0x48, 0x89, 0x44, 0x24, 0xf8,
+      // mov    rax,0x14
       0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00,
-      // 12: 48 03 45 f8             add    rax,QWORD PTR [rbp-0x8]
-      0x48, 0x03, 0x45, 0xf8};
+      // add    rax,QWORD PTR [rbp-0x8]
+      0x48, 0x03, 0x44, 0x24, 0xf8};
+  // clang-format on
   EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
@@ -1757,27 +1879,29 @@ TEST compile_binary_plus_nested(Buffer *buf) {
       new_binary_call("+", AST_new_integer(3), AST_new_integer(4)));
   int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
+  // clang-format off
   byte expected[] = {
-      // 4:  48 c7 c0 10 00 00 00    mov    rax,0x10
+      // mov    rax,0x10
       0x48, 0xc7, 0xc0, 0x10, 0x00, 0x00, 0x00,
-      // b:  48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
-      0x48, 0x89, 0x45, 0xf8,
-      // f:  48 c7 c0 0c 00 00 00    mov    rax,0xc
+      // mov    QWORD PTR [rsp-0x8],rax
+      0x48, 0x89, 0x44, 0x24, 0xf8,
+      // mov    rax,0xc
       0x48, 0xc7, 0xc0, 0x0c, 0x00, 0x00, 0x00,
-      // 16: 48 03 45 f8             add    rax,QWORD PTR [rbp-0x8]
-      0x48, 0x03, 0x45, 0xf8,
-      // 1a: 48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
-      0x48, 0x89, 0x45, 0xf8,
-      // 1e: 48 c7 c0 08 00 00 00    mov    rax,0x8
+      // add    rax,QWORD PTR [rsp-0x8]
+      0x48, 0x03, 0x44, 0x24, 0xf8,
+      // mov    QWORD PTR [rsp-0x8],rax
+      0x48, 0x89, 0x44, 0x24, 0xf8,
+      // mov    rax,0x8
       0x48, 0xc7, 0xc0, 0x08, 0x00, 0x00, 0x00,
-      // 25: 48 89 45 f0             mov    QWORD PTR [rbp-0x10],rax
-      0x48, 0x89, 0x45, 0xf0,
-      // 29: 48 c7 c0 04 00 00 00    mov    rax,0x4
+      // mov    QWORD PTR [rsp-0x10],rax
+      0x48, 0x89, 0x44, 0x24, 0xf0,
+      // mov    rax,0x4
       0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
-      // 30: 48 03 45 f0             add    rax,QWORD PTR [rbp-0x10]
-      0x48, 0x03, 0x45, 0xf0,
-      // 34: 48 03 45 f8             add    rax,QWORD PTR [rbp-0x8]
-      0x48, 0x03, 0x45, 0xf8};
+      // add    rax,QWORD PTR [rsp-0x10]
+      0x48, 0x03, 0x44, 0x24, 0xf0,
+      // add    rax,QWORD PTR [rsp-0x8]
+      0x48, 0x03, 0x44, 0x24, 0xf8};
+  // clang-format on
   EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
@@ -1790,15 +1914,17 @@ TEST compile_binary_minus(Buffer *buf) {
   ASTNode *node = new_binary_call("-", AST_new_integer(5), AST_new_integer(8));
   int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
+  // clang-format off
   byte expected[] = {
-      // 0:  48 c7 c0 20 00 00 00    mov    rax,0x20
+      // mov    rax,0x20
       0x48, 0xc7, 0xc0, 0x20, 0x00, 0x00, 0x00,
-      // 7:  48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
-      0x48, 0x89, 0x45, 0xf8,
-      // b:  48 c7 c0 14 00 00 00    mov    rax,0x14
+      // mov    QWORD PTR [rsp-0x8],rax
+      0x48, 0x89, 0x44, 0x24, 0xf8,
+      // mov    rax,0x14
       0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00,
-      // 12: 48 2b 45 f8             add    rax,QWORD PTR [rbp-0x8]
-      0x48, 0x2b, 0x45, 0xf8};
+      // add    rax,QWORD PTR [rsp-0x8]
+      0x48, 0x2b, 0x44, 0x24, 0xf8};
+  // clang-format on 
   EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
@@ -1813,27 +1939,29 @@ TEST compile_binary_minus_nested(Buffer *buf) {
       new_binary_call("-", AST_new_integer(4), AST_new_integer(3)));
   int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
+  // clang-format off
   byte expected[] = {
-      // 4:  48 c7 c0 0c 00 00 00    mov    rax,0xc
+      // mov    rax,0xc
       0x48, 0xc7, 0xc0, 0x0c, 0x00, 0x00, 0x00,
-      // b:  48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
-      0x48, 0x89, 0x45, 0xf8,
-      // f:  48 c7 c0 10 00 00 00    mov    rax,0x10
+      // mov    QWORD PTR [rsp-0x8],rax
+      0x48, 0x89, 0x44, 0x24, 0xf8,
+      // mov    rax,0x10
       0x48, 0xc7, 0xc0, 0x10, 0x00, 0x00, 0x00,
-      // 16: 48 2b 45 f8             add    rax,QWORD PTR [rbp-0x8]
-      0x48, 0x2b, 0x45, 0xf8,
-      // 1a: 48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
-      0x48, 0x89, 0x45, 0xf8,
-      // 1e: 48 c7 c0 04 00 00 00    mov    rax,0x4
+      // add    rax,QWORD PTR [rsp-0x8]
+      0x48, 0x2b, 0x44, 0x24, 0xf8,
+      //  mov    QWORD PTR [rsp-0x8],rax
+      0x48, 0x89, 0x44, 0x24, 0xf8,
+      // mov    rax,0x4
       0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
-      // 25: 48 89 45 f0             mov    QWORD PTR [rbp-0x10],rax
-      0x48, 0x89, 0x45, 0xf0,
-      // 29: 48 c7 c0 14 00 00 00    mov    rax,0x14
+      // mov    QWORD PTR [rsp-0x10],rax
+      0x48, 0x89, 0x44, 0x24, 0xf0,
+      // mov    rax,0x14
       0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00,
-      // 30: 48 2b 45 f0             add    rax,QWORD PTR [rbp-0x10]
-      0x48, 0x2b, 0x45, 0xf0,
-      // 34: 48 2b 45 f8             add    rax,QWORD PTR [rbp-0x8]
-      0x48, 0x2b, 0x45, 0xf8};
+      // add    rax,QWORD PTR [rsp-0x10]
+      0x48, 0x2b, 0x44, 0x24, 0xf0,
+      // add    rax,QWORD PTR [rsp-0x8]
+      0x48, 0x2b, 0x44, 0x24, 0xf8};
+  // clang-format on
   EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
@@ -1925,10 +2053,13 @@ TEST compile_symbol_in_env_returns_value(Buffer *buf) {
   ASTNode *node = AST_new_symbol("hello");
   Env env0 = Env_bind("hello", 33, /*prev=*/NULL);
   Env env1 = Env_bind("world", 66, &env0);
-  int compile_result = Compile_expr(buf, node, -kWordSize, &env1);
+  int compile_result = Compile_expr(buf, node, -kWordSize, &env1, NULL);
   ASSERT_EQ(compile_result, 0);
-  byte expected[] = {// mov rax, [rbp+33]
-                     0x48, 0x8b, 0x45, 33};
+  // clang-format off
+  byte expected[] = {
+    // mov rax, [rbp+33]
+    0x48, 0x8b, 0x44, 0x24, 33};
+  // clang-format on
   EXPECT_EQUALS_BYTES(buf, expected);
   AST_heap_free(node);
   PASS();
@@ -1938,10 +2069,13 @@ TEST compile_symbol_in_env_returns_first_value(Buffer *buf) {
   ASTNode *node = AST_new_symbol("hello");
   Env env0 = Env_bind("hello", 55, /*prev=*/NULL);
   Env env1 = Env_bind("hello", 66, &env0);
-  int compile_result = Compile_expr(buf, node, -kWordSize, &env1);
+  int compile_result = Compile_expr(buf, node, -kWordSize, &env1, NULL);
   ASSERT_EQ(compile_result, 0);
-  byte expected[] = {// mov rax, [rbp+66]
-                     0x48, 0x8b, 0x45, 66};
+  // clang-format off
+  byte expected[] = {
+    // mov rax, [rbp+66]
+    0x48, 0x8b, 0x44, 0x24, 66};
+  // clang-format on
   EXPECT_EQUALS_BYTES(buf, expected);
   AST_heap_free(node);
   PASS();
@@ -1949,7 +2083,7 @@ TEST compile_symbol_in_env_returns_first_value(Buffer *buf) {
 
 TEST compile_symbol_not_in_env_raises_compile_error(Buffer *buf) {
   ASTNode *node = AST_new_symbol("hello");
-  int compile_result = Compile_expr(buf, node, -kWordSize, NULL);
+  int compile_result = Compile_expr(buf, node, -kWordSize, NULL, NULL);
   ASSERT_EQ(compile_result, -1);
   AST_heap_free(node);
   PASS();
@@ -2011,19 +2145,22 @@ TEST compile_if_with_true_cond(Buffer *buf) {
   ASTNode *node = Reader_read("(if #t 1 2)");
   int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
-  byte expected[] = {// mov rax, 0x9f
-                     0x48, 0xc7, 0xc0, 0x9f, 0x00, 0x00, 0x00,
-                     // cmp rax, 0x1f
-                     0x48, 0x3d, 0x1f, 0x00, 0x00, 0x00,
-                     // je alternate
-                     0x0f, 0x84, 0x0c, 0x00, 0x00, 0x00,
-                     // mov rax, compile (1)
-                     0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
-                     // jmp end
-                     0xe9, 0x07, 0x00, 0x00, 0x00,
-                     // alternate:
-                     // mov rax, compile (2)
-                     0x48, 0xc7, 0xc0, 0x08, 0x00, 0x00, 0x00};
+  // clang-format off
+  byte expected[] = {
+    // mov rax, 0x9f
+    0x48, 0xc7, 0xc0, 0x9f, 0x00, 0x00, 0x00,
+    // cmp rax, 0x1f
+    0x48, 0x3d, 0x1f, 0x00, 0x00, 0x00,
+    // je alternate
+    0x0f, 0x84, 0x0c, 0x00, 0x00, 0x00,
+    // mov rax, compile (1)
+    0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
+    // jmp end
+    0xe9, 0x07, 0x00, 0x00, 0x00,
+    // alternate:
+    // mov rax, compile (2)
+    0x48, 0xc7, 0xc0, 0x08, 0x00, 0x00, 0x00};
+  // clang-format on
   EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
@@ -2036,22 +2173,24 @@ TEST compile_if_with_false_cond(Buffer *buf) {
   ASTNode *node = Reader_read("(if #f 1 2)");
   int compile_result = Compile_entry(buf, node);
   ASSERT_EQ(compile_result, 0);
+  // clang-format off
   byte expected[] = {
-      // mov rax, 0x1f
-      0x48, 0xc7, 0xc0, 0x1f, 0x00, 0x00, 0x00,
-      // cmp rax, 0x1f
-      0x48, 0x3d, 0x1f, 0x00, 0x00, 0x00,
-      // je alternate
-      0x0f, 0x84, 0x0c, 0x00, 0x00, 0x00,
-      // mov rax, compile(1)
-      0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
-      // jmp end
-      0xe9, 0x07, 0x00, 0x00, 0x00,
-      // alternate:
-      // mov rax, compile(2)
-      0x48, 0xc7, 0xc0, 0x08, 0x00, 0x00, 0x00
-      // end:
+    // mov rax, 0x1f
+    0x48, 0xc7, 0xc0, 0x1f, 0x00, 0x00, 0x00,
+    // cmp rax, 0x1f
+    0x48, 0x3d, 0x1f, 0x00, 0x00, 0x00,
+    // je alternate
+    0x0f, 0x84, 0x0c, 0x00, 0x00, 0x00,
+    // mov rax, compile(1)
+    0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
+    // jmp end
+    0xe9, 0x07, 0x00, 0x00, 0x00,
+    // alternate:
+    // mov rax, compile(2)
+    0x48, 0xc7, 0xc0, 0x08, 0x00, 0x00, 0x00
+    // end:
   };
+  // clang-format on
   EXPECT_ENTRY_CONTAINS_CODE(buf, expected);
   Buffer_make_executable(buf);
   uword result = Testing_execute_expr(buf);
@@ -2214,6 +2353,257 @@ TEST compile_cdr(Buffer *buf, uword *heap) {
   PASS();
 }
 
+TEST compile_code_with_no_params(Buffer *buf) {
+  ASTNode *node = Reader_read("(code () 1)");
+  int compile_result = Compile_code(buf, node);
+  ASSERT_EQ(compile_result, 0);
+  // clang-format off
+  byte expected[] = {
+      // mov rax, 0x2
+      0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
+      // ret
+      0xc3,
+  };
+  // clang-format on
+  EXPECT_EQUALS_BYTES(buf, expected);
+  Buffer_make_executable(buf);
+  uword result = Testing_execute_expr(buf);
+  ASSERT_EQ_FMT(Object_encode_integer(1), result, "0x%lx");
+  AST_heap_free(node);
+  PASS();
+}
+
+TEST compile_code_with_one_param(Buffer *buf) {
+  ASTNode *node = Reader_read("(code (x) x)");
+  int compile_result = Compile_code(buf, node);
+  ASSERT_EQ(compile_result, 0);
+  // clang-format off
+  byte expected[] = {
+      // mov rax, [rsp-8]
+      0x48, 0x8b, 0x44, 0x24, 0xf8,
+      // ret
+      0xc3,
+  };
+  // clang-format on
+  EXPECT_EQUALS_BYTES(buf, expected);
+  AST_heap_free(node);
+  PASS();
+}
+
+TEST compile_code_with_two_params(Buffer *buf) {
+  ASTNode *node = Reader_read("(code (x y) (+ x y))");
+  int compile_result = Compile_code(buf, node);
+  ASSERT_EQ(compile_result, 0);
+  // clang-format off
+  byte expected[] = {
+      // mov rax, [rsp-16]
+      0x48, 0x8b, 0x44, 0x24, 0xf0,
+      // mov [rsp-24], rax
+      0x48, 0x89, 0x44, 0x24, 0xe8,
+      // mov rax, [rsp-8]
+      0x48, 0x8b, 0x44, 0x24, 0xf8,
+      // add rax, [rsp-24]
+      0x48, 0x03, 0x44, 0x24, 0xe8,
+      // ret
+      0xc3,
+  };
+  // clang-format on
+  EXPECT_EQUALS_BYTES(buf, expected);
+  AST_heap_free(node);
+  PASS();
+}
+
+TEST compile_labels_with_no_labels(Buffer *buf) {
+  ASTNode *node = Reader_read("(labels () 1)");
+  int compile_result = Compile_entry(buf, node);
+  ASSERT_EQ(compile_result, 0);
+  // clang-format off
+  byte expected[] = {
+      // mov rsi, rdi
+      0x48, 0x89, 0xfe,
+      // jmp 0x00
+      0xe9, 0x00, 0x00, 0x00, 0x00,
+      // mov rax, 0x2
+      0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
+      // ret
+      0xc3,
+  };
+  // clang-format on
+  EXPECT_EQUALS_BYTES(buf, expected);
+  Buffer_make_executable(buf);
+  uword result = Testing_execute_entry(buf, /*heap=*/NULL);
+  ASSERT_EQ_FMT(Object_encode_integer(1), result, "0x%lx");
+  AST_heap_free(node);
+  PASS();
+}
+
+TEST compile_labels_with_one_label(Buffer *buf) {
+  ASTNode *node = Reader_read("(labels ((const (code () 5))) 1)");
+  int compile_result = Compile_entry(buf, node);
+  ASSERT_EQ(compile_result, 0);
+  // clang-format off
+  byte expected[] = {
+      // mov rsi, rdi
+      0x48, 0x89, 0xfe,
+      // jmp 0x08
+      0xe9, 0x08, 0x00, 0x00, 0x00,
+      // mov rax, compile(5)
+      0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00,
+      // ret
+      0xc3,
+      // mov rax, 0x2
+      0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
+      // ret
+      0xc3,
+  };
+  // clang-format on
+  EXPECT_EQUALS_BYTES(buf, expected);
+  Buffer_make_executable(buf);
+  uword result = Testing_execute_entry(buf, /*heap=*/NULL);
+  ASSERT_EQ_FMT(Object_encode_integer(1), result, "0x%lx");
+  AST_heap_free(node);
+  PASS();
+}
+
+TEST compile_labelcall_with_no_params(Buffer *buf) {
+  ASTNode *node =
+      Reader_read("(labels ((const (code () 5))) (labelcall const))");
+  int compile_result = Compile_entry(buf, node);
+  ASSERT_EQ(compile_result, 0);
+  // clang-format off
+  byte expected[] = {
+      // mov rsi, rdi
+      0x48, 0x89, 0xfe,
+      // jmp 0x08
+      0xe9, 0x08, 0x00, 0x00, 0x00,
+      // mov rax, compile(5)
+      0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00,
+      // ret
+      0xc3,
+      // call `const`
+      0xe8, 0xf3, 0xff, 0xff, 0xff,
+      // ret
+      0xc3,
+  };
+  // clang-format on
+  EXPECT_EQUALS_BYTES(buf, expected);
+  Buffer_make_executable(buf);
+  uword result = Testing_execute_entry(buf, /*heap=*/NULL);
+  ASSERT_EQ_FMT(Object_encode_integer(5), result, "0x%lx");
+  AST_heap_free(node);
+  PASS();
+}
+
+TEST compile_labelcall_with_no_params_and_locals(Buffer *buf) {
+  ASTNode *node = Reader_read(
+      "(labels ((const (code () 5))) (let ((a 1)) (labelcall const)))");
+  int compile_result = Compile_entry(buf, node);
+  ASSERT_EQ(compile_result, 0);
+  // clang-format off
+  byte expected[] = {
+      // mov rsi, rdi
+      0x48, 0x89, 0xfe,
+      // jmp 0x08
+      0xe9, 0x08, 0x00, 0x00, 0x00,
+      // mov rax, compile(5)
+      0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00,
+      // ret
+      0xc3,
+      // mov rax, compile(1)
+      0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
+      // mov [rsp-8], rax
+      0x48, 0x89, 0x44, 0x24, 0xf8,
+      // sub rsp, 8
+      0x48, 0x81, 0xec, 0x08, 0x00, 0x00, 0x00,
+      // call `const`
+      0xe8, 0xe0, 0xff, 0xff, 0xff,
+      // add rsp, 8
+      0x48, 0x81, 0xc4, 0x08, 0x00, 0x00, 0x00,
+      // ret
+      0xc3,
+  };
+  // clang-format on
+  EXPECT_EQUALS_BYTES(buf, expected);
+  Buffer_make_executable(buf);
+  uword result = Testing_execute_entry(buf, /*heap=*/NULL);
+  ASSERT_EQ_FMT(Object_encode_integer(5), result, "0x%lx");
+  AST_heap_free(node);
+  PASS();
+}
+
+TEST compile_labelcall_with_one_param(Buffer *buf) {
+  ASTNode *node = Reader_read("(labels ((id (code (x) x))) (labelcall id 5))");
+  int compile_result = Compile_entry(buf, node);
+  ASSERT_EQ(compile_result, 0);
+  // clang-format off
+  byte expected[] = {
+      // mov rsi, rdi
+      0x48, 0x89, 0xfe,
+      // jmp 0x06
+      0xe9, 0x06, 0x00, 0x00, 0x00,
+      // mov rax, [rsp-8]
+      0x48, 0x8b, 0x44, 0x24, 0xf8,
+      // ret
+      0xc3,
+      // mov rax, compile(5)
+      0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00,
+      // mov [rsp-16], rax
+      0x48, 0x89, 0x44, 0x24, 0xf0,
+      // call `id`
+      0xe8, 0xe9, 0xff, 0xff, 0xff,
+      // ret
+      0xc3,
+  };
+  // clang-format on
+  EXPECT_EQUALS_BYTES(buf, expected);
+  Buffer_make_executable(buf);
+  uword result = Testing_execute_entry(buf, /*heap=*/NULL);
+  ASSERT_EQ_FMT(Object_encode_integer(5), result, "0x%lx");
+  AST_heap_free(node);
+  PASS();
+}
+
+TEST compile_labelcall_with_one_param_and_locals(Buffer *buf) {
+  ASTNode *node = Reader_read(
+      "(labels ((id (code (x) x))) (let ((a 1)) (labelcall id 5)))");
+  int compile_result = Compile_entry(buf, node);
+  ASSERT_EQ(compile_result, 0);
+  // clang-format off
+  byte expected[] = {
+      // mov rsi, rdi
+      0x48, 0x89, 0xfe,
+      // jmp 0x06
+      0xe9, 0x06, 0x00, 0x00, 0x00,
+      // mov rax, [rsp-8]
+      0x48, 0x8b, 0x44, 0x24, 0xf8,
+      // ret
+      0xc3,
+      // mov rax, compile(1)
+      0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
+      // mov [rsp-8], rax
+      0x48, 0x89, 0x44, 0x24, 0xf8,
+      // mov rax, compile(5)
+      0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00,
+      // mov [rsp-24], rax
+      0x48, 0x89, 0x44, 0x24, 0xe8,
+      // sub rsp, 8
+      0x48, 0x81, 0xec, 0x08, 0x00, 0x00, 0x00,
+      // call `id`
+      0xe8, 0xd6, 0xff, 0xff, 0xff,
+      // add rsp, 8
+      0x48, 0x81, 0xc4, 0x08, 0x00, 0x00, 0x00,
+      // ret
+      0xc3,
+  };
+  // clang-format on
+  EXPECT_EQUALS_BYTES(buf, expected);
+  Buffer_make_executable(buf);
+  uword result = Testing_execute_entry(buf, /*heap=*/NULL);
+  ASSERT_EQ_FMT(Object_encode_integer(5), result, "0x%lx");
+  AST_heap_free(node);
+  PASS();
+}
+
 SUITE(object_tests) {
   RUN_TEST(encode_positive_integer);
   RUN_TEST(encode_negative_integer);
@@ -2301,6 +2691,15 @@ SUITE(compiler_tests) {
   RUN_HEAP_TEST(compile_nested_cons);
   RUN_HEAP_TEST(compile_car);
   RUN_HEAP_TEST(compile_cdr);
+  RUN_BUFFER_TEST(compile_code_with_no_params);
+  RUN_BUFFER_TEST(compile_code_with_one_param);
+  RUN_BUFFER_TEST(compile_code_with_two_params);
+  RUN_BUFFER_TEST(compile_labels_with_no_labels);
+  RUN_BUFFER_TEST(compile_labels_with_one_label);
+  RUN_BUFFER_TEST(compile_labelcall_with_no_params);
+  RUN_BUFFER_TEST(compile_labelcall_with_no_params_and_locals);
+  RUN_BUFFER_TEST(compile_labelcall_with_one_param);
+  RUN_BUFFER_TEST(compile_labelcall_with_one_param_and_locals);
 }
 // End Tests
 
@@ -2350,7 +2749,7 @@ void print_assembly(char *line) {
   // Compile the line
   Buffer buf;
   Buffer_init(&buf, 1);
-  int result = Compile_expr(&buf, node, /*stack_index=*/-kWordSize, NULL);
+  int result = Compile_expr(&buf, node, /*stack_index=*/-kWordSize, NULL, NULL);
   AST_heap_free(node);
   if (result < 0) {
     fprintf(stderr, "Compile error.\n");
